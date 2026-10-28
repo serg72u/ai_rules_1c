@@ -1,5 +1,6 @@
-﻿# xdto-edit v1.0 — Point edits of a 1C XDTO package
+﻿# xdto-edit v1.9 — Point edits of a 1C XDTO package (+support-guard: общая реализация вместо урезанной)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+[CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory=$true)]
 	[Alias('Path')]
@@ -23,18 +24,27 @@ $MD_NS   = "http://v8.1c.ru/8.3/MDClasses"
 $V8_NS   = "http://v8.1c.ru/8.1/data/core"
 
 # --- Support guard (Ext/ParentConfigurations.bin) ---
-# Canon: docs/support-manage.md. Blocks edits when the configuration is on
-# vendor support (Ext/ParentConfigurations.bin present next to
-# Configuration.xml). Reaction from .dev.env SUPPORT_GUARD (deny|warn|off,
-# default deny; .v8-project.json editingAllowedCheck stays as the upstream
-# fallback): deny throws, warn warns and continues, off skips the check.
+# See docs/1c-support-state-spec.md. Blocks edits of vendor objects "на замке" /
+# read-only configs unless allowed. Trigger = bin present; reaction from
+# .v8-project.json editingAllowedCheck (deny|warn|off, default deny). Never
+# throws — guard errors degrade to allow.
+function Get-RootUuid([string]$xmlPath) {
+	if (-not (Test-Path $xmlPath)) { return $null }
+	try {
+		[xml]$mx = Get-Content -Path $xmlPath -Encoding UTF8
+		$el = $mx.DocumentElement.FirstChild
+		while ($el -and $el.NodeType -ne 'Element') { $el = $el.NextSibling }
+		if ($el) { $u = $el.GetAttribute("uuid"); if ($u) { return $u } }
+	} catch {}
+	return $null
+}
 function Test-ExternalObjectRoot([string]$xmlPath) {
 	if (-not (Test-Path $xmlPath)) { return $false }
 	try {
 		[xml]$mx = Get-Content -Path $xmlPath -Encoding UTF8
 		$el = $mx.DocumentElement.FirstChild
 		while ($el -and $el.NodeType -ne 'Element') { $el = $el.NextSibling }
-		if ($el) { return @('ExternalDataProcessor','ExternalReport') -contains $el.get_LocalName() }
+		if ($el) { return @('ExternalDataProcessor','ExternalReport') -contains $el.LocalName }
 	} catch {}
 	return $false
 }
@@ -59,48 +69,107 @@ function Get-EditMode([string]$cfgDir) {
 	}
 	$mode = "deny"
 	try {
-		$pj = Find-V8Project $cfgDir
-		if ($pj) {
-			$cfg = Get-Content -Path $pj -Raw -Encoding UTF8 | ConvertFrom-Json
-			if ($cfg.PSObject.Properties.Name -contains 'editingAllowedCheck' -and $cfg.editingAllowedCheck) {
-				$mode = [string]$cfg.editingAllowedCheck
+		$pj = Find-V8Project (Get-Location).ProviderPath
+		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
+		if (-not $pj) { return 'deny' }
+		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
+		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
+		# configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+		# проекта база не сопоставляется и берётся правило проекта.
+		$projDir = [System.IO.Path]::GetDirectoryName($pj)
+		$cfgFull = [System.IO.Path]::GetFullPath($cfgDir).TrimEnd('\', '/')
+		if ($proj.databases) {
+			foreach ($db in $proj.databases) {
+				if ($db.configSrc) {
+					$src = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($projDir, $db.configSrc)).TrimEnd('\', '/')
+					if ($cfgFull -eq $src -or $cfgFull.StartsWith($src + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+						if ($db.editingAllowedCheck) { return $db.editingAllowedCheck }
+					}
+				}
 			}
 		}
-	} catch {}
-	return $mode
+		if ($proj.editingAllowedCheck) { return $proj.editingAllowedCheck }
+		return 'deny'
+	} catch { return 'deny' }
 }
-function Assert-EditAllowed([string]$targetPath) {
+function Assert-EditAllowed([string]$targetPath, [string]$require) {
 	try {
-		$d = $targetPath
-		for ($i = 0; $i -lt 20 -and $d; $i++) {
-			foreach ($x in @(Get-ChildItem -Path $d -Filter "*.xml" -File -ErrorAction SilentlyContinue)) {
-				if (Test-ExternalObjectRoot $x.FullName) { return }
+		$rp = $targetPath
+		try { $rp = (Resolve-Path $targetPath -ErrorAction Stop).ProviderPath } catch {}
+		# Autonomous external object (EPF/ERF): never part of a config on support (issue #39).
+		if (Test-ExternalObjectRoot $rp) { return }
+		$elemUuid = Get-RootUuid $rp
+		$cfgDir = $null; $binPath = $null
+		$d = if (Test-Path $rp -PathType Container) { $rp } else { [System.IO.Path]::GetDirectoryName($rp) }
+		for ($i = 0; $i -lt 12 -and $d; $i++) {
+			if (Test-ExternalObjectRoot "$d.xml") { return }
+			if (-not $elemUuid) { $elemUuid = Get-RootUuid "$d.xml" }
+			if (-not $cfgDir) {
+				$cand = Join-Path (Join-Path $d "Ext") "ParentConfigurations.bin"
+				if ((Test-Path $cand) -or (Test-Path (Join-Path $d "Configuration.xml"))) { $cfgDir = $d; $binPath = $cand }
 			}
-			$cfgXml = Join-Path $d "Configuration.xml"
-			$supportBin = Join-Path (Join-Path $d "Ext") "ParentConfigurations.bin"
-			if (Test-Path $cfgXml) {
-				if (Test-Path $supportBin) {
-					$mode = Get-EditMode $d
-					if ($mode -eq "off") { return }
-					$msg = "Конфигурация находится на поддержке (Ext/ParentConfigurations.bin). Правка может быть запрещена."
-					if ($mode -eq "warn") { Write-Warning $msg; return }
-					throw "$msg Снимите с поддержки (support-edit) или задайте SUPPORT_GUARD = warn|off в .dev.env."
-				}
-				return
-			}
+			if ($elemUuid -and $cfgDir) { break }
 			$parent = [System.IO.Path]::GetDirectoryName($d)
 			if ($parent -eq $d) { break }
 			$d = $parent
 		}
-	} catch [System.Management.Automation.RuntimeException] {
-		throw
-	} catch {}
+		# New object (no element file): fall back to config root uuid.
+		if (-not $elemUuid -and $cfgDir) { $elemUuid = Get-RootUuid (Join-Path $cfgDir "Configuration.xml") }
+		if (-not $binPath -or -not (Test-Path $binPath)) { return }
+		$bytes = [System.IO.File]::ReadAllBytes($binPath)
+		if ($bytes.Length -le 32) { return }
+		$start = 0
+		if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+		$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
+		$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
+		if (-not $hm.Success) { return }
+		$G = [int]$hm.Groups[1].Value
+		$K = [int]$hm.Groups[2].Value
+		if ($K -eq 0) { return }
+		$best = $null
+		if ($elemUuid) {
+			$u = [regex]::Escape($elemUuid.ToLower())
+			foreach ($m in [regex]::Matches($text, "([0-2]),0,$u")) {
+				$f1 = [int]$m.Groups[1].Value
+				if ($null -eq $best -or $f1 -lt $best) { $best = $f1 }
+			}
+		}
+		$blocked = $false; $code = ""; $reason = ""
+		if ($G -eq 1) { $blocked = $true; $code = "capability-off"; $reason = "возможность изменения конфигурации выключена (вся конфигурация read-only)" }
+		elseif ($require -eq 'removed') {
+			if ($null -ne $best -and $best -ne 2) { $blocked = $true; $code = "not-removed"; $reason = "объект не снят с поддержки — удаление сломает обновления" }
+		}
+		else {
+			if ($null -ne $best -and $best -eq 0) { $blocked = $true; $code = "locked"; $reason = "объект на замке — редактирование сломает обновления" }
+		}
+		if (-not $blocked) { return }
+		$mode = Get-EditMode $cfgDir
+		if ($mode -eq 'off') { return }
+		# Use Console.Error (not Write-Error) — under ErrorActionPreference=Stop the
+		# latter throws and would be swallowed by this function's own catch.
+		if ($mode -eq 'warn') { [Console]::Error.WriteLine("[support-guard] ПРЕДУПРЕЖДЕНИЕ: $reason. Цель: $rp"); return }
+		$head = "[support-guard] Редактирование отклонено: это объект типовой конфигурации на поддержке поставщика, прямое редактирование молча сломает будущие обновления."
+		$cfe = "Рекомендуемый путь: внести доработку в расширение (навыки cfe-borrow / cfe-patch-method) — состояние поддержки менять не нужно, обновления вендора сохраняются."
+		$offNote = "Снять проверку для этой базы: editingAllowedCheck = warn|off в .v8-project.json."
+		if ($code -eq "capability-off") {
+			$state = "Состояние: у всей конфигурации выключена возможность изменения (режим read-only «из коробки») — поэтому объект «$rp» редактировать нельзя."
+			$fix = "Либо снять защиту явно (навык support-edit, два шага):`n  1. support-edit -Path ""$cfgDir"" -Capability on — включить возможность изменения (объекты пока остаются на замке);`n  2. support-edit -Path ""$rp"" -Set editable — открыть этот объект для редактирования.`n  Изменение применяется в базу полной загрузкой выгрузки и обходит механизм обновлений вендора."
+		} elseif ($code -eq "not-removed") {
+			$state = "Состояние: объект «$rp» на поддержке (не снят с поддержки) — его удаление разорвёт обновления вендора."
+			$fix = "Либо сначала снять объект с поддержки, затем удалять:`n  support-edit -Path ""$rp"" -Set off-support — объект уходит из-под обновлений, после этого удаление безопасно."
+		} else {
+			$state = "Состояние: объект «$rp» на замке (возможность изменения конфигурации включена, но сам объект не редактируется)."
+			$fix = "Либо разрешить редактирование этого объекта (навык support-edit, выбрать одно):`n  support-edit -Path ""$rp"" -Set editable — редактировать и дальше получать обновления вендора (возможны конфликты слияния);`n  support-edit -Path ""$rp"" -Set off-support — снять с поддержки: обновления по объекту больше не приходят."
+		}
+		[Console]::Error.WriteLine("$head`n$state`n$cfe`n$fix`n$offNote")
+		exit 1
+	} catch { return }
 }
 
 # --- Resolve package ------------------------------------------------------------
 
 if (-not [System.IO.Path]::IsPathRooted($PackagePath)) {
-	$PackagePath = Join-Path (Get-Location).Path $PackagePath
+	$PackagePath = Join-Path (Get-Location).ProviderPath $PackagePath
 }
 
 $pkgDir = $null
@@ -128,13 +197,13 @@ $configXml  = Join-Path $configRoot "Configuration.xml"
 if ($Value -and $Value.StartsWith("@")) {
 	$valueFile = $Value.Substring(1)
 	if (-not [System.IO.Path]::IsPathRooted($valueFile)) {
-		$valueFile = Join-Path (Get-Location).Path $valueFile
+		$valueFile = Join-Path (Get-Location).ProviderPath $valueFile
 	}
 	if (-not (Test-Path $valueFile -PathType Leaf)) { throw "Файл значения не найден: $valueFile" }
 	$Value = [System.IO.File]::ReadAllText($valueFile).Trim()
 }
 
-Assert-EditAllowed $pkgDir
+Assert-EditAllowed $pkgDir "editable"
 
 $encBom = New-Object System.Text.UTF8Encoding($true)
 
@@ -231,10 +300,26 @@ function Edit-Metadata([string]$field, [string]$newValue) {
 	$settings = New-Object System.Xml.XmlWriterSettings
 	$settings.Encoding = $encBom
 	$settings.Indent = $false
-	$stream = New-Object System.IO.FileStream($mdFile, [System.IO.FileMode]::Create)
-	$writer = [System.Xml.XmlWriter]::Create($stream, $settings)
+	$settings.NewLineHandling = [System.Xml.NewLineHandling]::None
+	# Через MemoryStream, а не прямо в файл: нужен шаг пост-обработки строки.
+	$memStream = New-Object System.IO.MemoryStream
+	$writer = [System.Xml.XmlWriter]::Create($memStream, $settings)
 	$doc.Save($writer)
-	$writer.Close(); $stream.Close()
+	$writer.Flush(); $writer.Close()
+
+	$mdText = [System.Text.Encoding]::UTF8.GetString($memStream.ToArray())
+	$memStream.Close()
+	if ($mdText.Length -gt 0 -and $mdText[0] -eq [char]0xFEFF) { $mdText = $mdText.Substring(1) }
+	$mdText = $mdText.Replace('encoding="utf-8"', 'encoding="UTF-8"')
+	# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
+	# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
+	# поэтому они идут первыми ветками альтернации и возвращаются как есть.
+	$mdText = [regex]::Replace($mdText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+	# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
+	# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
+	$targetEol = if ((Test-Path -LiteralPath $mdFile) -and ([System.IO.File]::ReadAllText($mdFile) -notmatch "`r`n")) { "`n" } else { "`r`n" }
+	$mdText = ($mdText -replace "`r`n", "`n") -replace "`n", $targetEol
+	[System.IO.File]::WriteAllText($mdFile, $mdText, $encBom)
 }
 
 function Rename-Package([string]$newName) {
@@ -262,9 +347,24 @@ function Rename-Package([string]$newName) {
 		if ($found) {
 			$s = New-Object System.Xml.XmlWriterSettings
 			$s.Encoding = $encBom; $s.Indent = $false
-			$st = New-Object System.IO.FileStream($configXml, [System.IO.FileMode]::Create)
-			$w = [System.Xml.XmlWriter]::Create($st, $s)
-			$cfg.Save($w); $w.Close(); $st.Close()
+			$s.NewLineHandling = [System.Xml.NewLineHandling]::None
+			# Через MemoryStream, а не прямо в файл: нужен шаг пост-обработки строки.
+			$mem = New-Object System.IO.MemoryStream
+			$w = [System.Xml.XmlWriter]::Create($mem, $s)
+			$cfg.Save($w); $w.Flush(); $w.Close()
+			$cfgText = [System.Text.Encoding]::UTF8.GetString($mem.ToArray())
+			$mem.Close()
+			if ($cfgText.Length -gt 0 -and $cfgText[0] -eq [char]0xFEFF) { $cfgText = $cfgText.Substring(1) }
+			$cfgText = $cfgText.Replace('encoding="utf-8"', 'encoding="UTF-8"')
+			# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
+			# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
+			# поэтому они идут первыми ветками альтернации и возвращаются как есть.
+			$cfgText = [regex]::Replace($cfgText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+			# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
+			# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
+			$targetEol = if ((Test-Path -LiteralPath $configXml) -and ([System.IO.File]::ReadAllText($configXml) -notmatch "`r`n")) { "`n" } else { "`r`n" }
+			$cfgText = ($cfgText -replace "`r`n", "`n") -replace "`n", $targetEol
+			[System.IO.File]::WriteAllText($configXml, $cfgText, $encBom)
 			Write-Host "  Configuration.xml: <XDTOPackage> переименован в $newName"
 		} else {
 			Write-Warning "В Configuration.xml не найдена запись <XDTOPackage>$pkgName</XDTOPackage> — зарегистрируйте пакет вручную"
@@ -321,7 +421,7 @@ function Find-Declaration([System.Xml.XmlElement]$body, [string]$propName) {
 
 # Путь Тип.Свойство[.Вложенное...] — точка безопасна: имена в модели XDTO
 # являются идентификаторами 1С и точку содержать не могут
-function Resolve-Path($schema, [string]$path) {
+function Resolve-SchemaPath($schema, [string]$path) {
 	$segments = $path.Split(".")
 	$typeEl = Find-TypeElement $schema $segments[0]
 	if ($segments.Count -eq 1) { return [pscustomobject]@{ Type = $typeEl; Decl = $null } }
@@ -372,7 +472,7 @@ function Apply-ModelOperation($schema) {
 
 		"add-property" {
 			if (-not $Target) { throw "add-property требует -Target <Тип>" }
-			$loc = Resolve-Path $schema $Target
+			$loc = Resolve-SchemaPath $schema $Target
 			$body = Get-TypeBody $(if ($loc.Decl) { Get-SchemaFirst $loc.Decl "complexType" } else { $loc.Type })
 			foreach ($frag in (Import-Fragment $schema $Value)) {
 				$kind = $frag.get_LocalName()
@@ -398,7 +498,7 @@ function Apply-ModelOperation($schema) {
 
 		"replace-property" {
 			if (-not $Target) { throw "replace-property требует -Target `"Тип.Свойство`"" }
-			$loc = Resolve-Path $schema $Target
+			$loc = Resolve-SchemaPath $schema $Target
 			if (-not $loc.Decl) { throw "replace-property требует путь вида `"Тип.Свойство`"" }
 			$frags = Import-Fragment $schema $Value
 			if ($frags.Count -ne 1) { throw "replace-property ожидает ровно одно объявление" }
@@ -410,7 +510,7 @@ function Apply-ModelOperation($schema) {
 			if (-not $Target) { throw "remove-property требует путь `"Тип.Свойство`"" }
 			foreach ($one in ($Target -split "\s*;;\s*")) {
 				if (-not $one) { continue }
-				$loc = Resolve-Path $schema $one
+				$loc = Resolve-SchemaPath $schema $one
 				if (-not $loc.Decl) { throw "remove-property требует путь вида `"Тип.Свойство`", получено `"$one`"" }
 				$loc.Decl.ParentNode.RemoveChild($loc.Decl) | Out-Null
 				Write-Host "  − $one удалено"
