@@ -238,9 +238,13 @@ Applies main configuration changes to the database configuration (`/UpdateDBCfg`
 |-----------------|-------------|
 | `-Extension <name>` | Update extension |
 | `-AllExtensions` | Update all extensions |
-| `-Dynamic <auto/disable>` | `auto` dynamic update, `disable` turn it off (`+`/`-` still accepted, but a lone `-` never reaches the script through `powershell.exe -File` — PowerShell 5.1 exits silently; use `disable` or `-Dynamic:-`) |
+| `-Dynamic <on/off>` | `on` dynamic update, `off` disables it (`yes`/`no` and `+`/`-` are accepted too; `off` is the `-File`-safe spelling — a lone `-` never reaches the script through `powershell.exe -File`, where PowerShell 5.1 exits silently; `-Dynamic:-` also works in-process) |
 | `-Server` | Server-side update |
 | `-WarningsAsErrors` | Treat warnings as errors |
+| `-StrictLog` | Escalate the extension apply-check failure to a non-zero exit (silent log rejections already fail the run — see below) |
+| `-NoApplyCheck` | Skip the extension applicability post-check |
+
+The verdict is three signals: process exit code, `/DumpResult` (added by the tool, `0` = success) and the `/Out` log. A run whose log reports a rejection (`Неверное свойство объекта метаданных`, `Неизвестное имя типа`, `Ошибка обновления конфигурации базы данных` and similar) while the platform exited 0 is **failed**, not merely warned about — this fork always exits non-zero there, regardless of `-StrictLog`. After `-Extension` / `-AllExtensions`, applicability is asked from the platform itself (`/CheckCanApplyConfigurationExtensions` in a separate launch), because a loaded extension can remain inapplicable and fail only at first call.
 
 **Warning**: Non-dynamic update requires exclusive database access (all users must exit).
 
@@ -290,6 +294,7 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-db-ops/script
 | `-ConfigDir <path>` | Export directory (required) |
 | `-Mode <mode>` | `Full` / `Changes` (default) / `Partial` / `UpdateInfo` |
 | `-Objects <list>` | Object names comma-separated (for Partial) |
+| `-ObjectsFile <path>` | File with one object name per line (alternative to `-Objects`) |
 | `-Extension <name>` | Dump extension |
 | `-Format <format>` | `Hierarchical` (default) / `Plain` |
 
@@ -304,7 +309,9 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-db-ops/script
 
 Choose the mode from the task and `/loadfrom1cbase → Select scope`; state the inferred choice instead of asking again when the scope is established. Partial mode accepts **metadata names**, not import file paths; include needed separate development objects explicitly. Check the dirty destination and a non-empty selection before running.
 
-Designer mappings: `Full` → `/DumpConfigToFiles`; `Changes` → `-update -force`; `Partial` → `-listFile` generated from `-Objects`; `UpdateInfo` → `-configDumpInfoOnly`. `Changes` therefore permits a full dump on a format-version mismatch. When that wider overwrite is not authorized, use the command's Designer `-update` template without `-force`. Missing baselines must be resolved before the run; `UpdateInfo` does not export files or establish that their contents match the infobase.
+An object list (`-Objects` / `-ObjectsFile`) **makes the operation partial by itself**: an explicit `-Mode Full` / `-Mode Changes` is reported as not applied and only the listed objects are dumped, and `-Mode UpdateInfo` with a list is refused as a different operation. Without either, the default mode is `Changes`.
+
+Designer mappings: `Full` → `/DumpConfigToFiles`; `Changes` → `-update` only; `Partial` → `-listFile` generated from `-Objects` / `-ObjectsFile`; `UpdateInfo` → `-configDumpInfoOnly`. `Changes` deliberately omits `-force`: with `-force` a format-version mismatch makes the platform silently re-dump the whole configuration while the caller believes an incremental export ran. The mismatch surfaces as a platform refusal instead; resolve it with an explicit full dump into an authorized destination. Missing baselines must be resolved before the run; `UpdateInfo` does not export files or establish that their contents match the infobase.
 
 For `-getChanges` reports or `-configDumpInfoForChanges` delta exports, use the Designer procedure in the synchronization contract. This wrapper has no dedicated parameters for those modes. Keep their report/baseline/output paths distinct; a delta output directory must start empty.
 
@@ -326,8 +333,12 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-db-ops/script
 | `-ListFile <path>` | File with path list (alternative to `-Files`) |
 | `-Extension <name>` | Load into extension |
 | `-Format <format>` | `Hierarchical` (default) / `Plain` |
+| `-StrictLog` | Fail the run when the `/Out` log reports a rejection although the platform exited 0 |
+| `-NoApplyCheck` | Skip the extension applicability post-check |
 
-Partial mode accepts **file paths** through exactly one of `-Files` / `-ListFile`; validate scope, existence and dependencies first. A raw platform list is UTF-8 with no blank lines. The Designer branch writes its own list, adds `-partial -updateConfigDumpInfo`, and uses `-Format`; confirm the platform supports the intended flags. It excludes service files (`ConfigDumpInfo.xml`, `ParentConfigurations.bin`) from partial loading. If those exclusions omit part of the requested change, resolve the scope instead of reporting a complete deployment. Do not combine partial mode with `-AllExtensions`. When the list includes `Configuration.xml` (for example after a new object is borrowed into an extension), Designer reads every object file in the directory, not only the listed ones (reported on 8.3.27 extension loads): an unlisted file that does not load, such as a borrowed form referring to an unborrowed `CommonPicture` or `StyleItem`, fails the whole load. Run `cfe-validate` on the extension directory before such a load.
+`-AllExtensions` is refused together with a partial load (`-Files` / `-ListFile`) on both engines: the platform's `-AllExtensions` is incompatible with an import list, and a wrapper that passes both would silently load everything. After an extension load, applicability is verified by a separate `/CheckCanApplyConfigurationExtensions` launch — a loaded extension can remain inapplicable and fail only at the first call.
+
+Partial mode accepts **file paths** through exactly one of `-Files` / `-ListFile`; either of them **implies** `Partial`, so an explicit `-Mode Full` is not applied. Validate scope, existence and dependencies first. A raw platform list is UTF-8 with no blank lines. The Designer branch writes its own list, adds `-partial -updateConfigDumpInfo`, and uses `-Format`; confirm the platform supports the intended flags. It excludes service files (`ConfigDumpInfo.xml`, `ParentConfigurations.bin`) from partial loading. If those exclusions omit part of the requested change, resolve the scope instead of reporting a complete deployment. Do not combine partial mode with `-AllExtensions`. When the list includes `Configuration.xml` (for example after a new object is borrowed into an extension), Designer reads every object file in the directory, not only the listed ones (reported on 8.3.27 extension loads): an unlisted file that does not load, such as a borrowed form referring to an unborrowed `CommonPicture` or `StyleItem`, fails the whole load. Run `cfe-validate` on the extension directory before such a load.
 
 Standalone load-only requests finish after loading. In `/update1cbase` / `/deploy-and-test`, continue with checks and `db-update`; a successful import or updated baseline is not a completed database update.
 
@@ -348,6 +359,8 @@ Determines changed configuration files from Git data and performs partial load i
 | `-CommitRange <range>` | Commit range for Source=Commit (e.g. `HEAD~3..HEAD`) |
 | `-Extension <name>` | Load into extension |
 | `-DryRun` | Only show what would be loaded (no actual load) |
+| `-StrictLog` | Fail the run when the `/Out` log reports a rejection although the platform exited 0 |
+| `-NoApplyCheck` | Skip the extension applicability post-check |
 
 #### Change Sources
 
@@ -359,6 +372,11 @@ Determines changed configuration files from Git data and performs partial load i
 | `Commit` | Files from commit range (requires `-CommitRange`) |
 
 Run `-DryRun` first to inspect the exact scope. Resolve deletions, renames, missing dependencies and excluded files before loading; files absent from the working tree are not automatically a successful metadata deletion. A no-change plan is a no-op. After a successful load, follow the same checks → `db-update` sequence when database update was requested.
+
+`-DryRun` reports two plan conditions that a partial load cannot apply, instead of loading and letting the agent claim success:
+
+- **Deletions.** A deleted configuration file is not removed from the infobase by a partial load — the object stays, because its owner's composition did not change. The run warns per file and, when deletions are the only changes, exits non-zero (`changes found, but none of them can be applied by a partial load`). Removing a metadata object is a change to `Configuration.xml` / the owner file, not the absence of a file: put the owner change in scope or load the full configuration.
+- **`Configuration.xml` in the list.** The platform then performs a **full** configuration load, not a partial one; the run says so before starting. Confirm the wider scope (and the destination) before continuing.
 
 ---
 
