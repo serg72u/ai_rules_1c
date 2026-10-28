@@ -1,4 +1,4 @@
-﻿# web-unpublish v1.0 — Remove 1C web publication
+﻿# web-unpublish v1.4 — Remove 1C web publication
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 # Local: -DryRun / -Force safety gate and consolidated-layout project root.
 <#
@@ -38,7 +38,7 @@
     .\web-unpublish.ps1 -AppName "bpdemo" -ApachePath "C:\tools\apache24" -Force
 #>
 
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
     [Parameter(Mandatory=$false)]
     [string]$AppName,
@@ -80,7 +80,7 @@ $confContent = [System.IO.File]::ReadAllText($confFile)
 
 # --- Helper: our httpd process ---
 $httpdExe = Join-Path (Join-Path $ApachePath "bin") "httpd.exe"
-$httpdExeNorm = (Resolve-Path $httpdExe -ErrorAction SilentlyContinue).Path
+$httpdExeNorm = (Resolve-Path $httpdExe -ErrorAction SilentlyContinue).ProviderPath
 function Get-OurHttpd {
     Get-Process httpd -ErrorAction SilentlyContinue | Where-Object {
         try { $_.Path -eq $httpdExeNorm } catch { $false }
