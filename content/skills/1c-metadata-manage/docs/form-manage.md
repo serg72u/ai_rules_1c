@@ -253,6 +253,27 @@ Same DSL as `1c-form-compile` — element keys, `command` / `stdCommand`, event 
 
 A `DynamicList` attribute **must** carry `settings.mainTable` and/or `settings.query`. Without a source the designer accepts the XML, but the form fails to open (`Основная таблица динамического списка задана неверно`). `form-edit` refuses that JSON before writing; `form-validate` reports the same gap on an existing form. The `settings` keys are the ones in [`form-compile-dsl.md`](form-compile-dsl.md) (`mainTable`, `query`, `manualQuery`, `dynamicDataRead`). `form-edit` emits those four; filters / order / conditional appearance stay with `form-compile`.
 
+#### Editing, renaming and removing existing items
+
+The same JSON also edits what is already in the form — the operation objects are applied in the order they are written:
+
+| Key | Operation | Notes |
+|-----|-----------|-------|
+| `elements` | `{ "set": "<name>", … }` | Change properties of an existing element (visibility, title, `events`, group orientation…). Name, type, data path and button command are **not** changed by `set` — remove and re-add for those |
+| `attributes` | `set` / `rename` + `to` / `remove` | A tabular-section column of the object is addressed `Объект.ТабличнаяЧасть.Колонка`, a form-attribute column `Таблица.Колонка` |
+| `commands` | `set` / `rename` / `remove` | `{ "set": "Загрузить", "action": "ЗагрузитьИзФайла" }` |
+| `parameters` | `set` / `rename` / `remove` | Form parameters |
+| `title` | string or `{ru, en}`; `null` removes it | |
+| `properties` | `{ "windowOpeningMode": "LockOwnerWindow" }`; `null` on a property removes it | Form-level properties |
+| `events` | `{ "OnOpen": "ПриОткрытии" }` | Form event handlers |
+| `excludedCommands` | `["Copy"]`, and `{ "remove": ["Copy"] }` to return one | Standard commands hidden from the form |
+| `conditionalAppearance` | list of rules | Form conditional appearance |
+| `commandInterface` | list of commands | Commands added to the form panels |
+
+`rename` keeps the element's `id` and moves every reference to the new name — data paths, conditional appearance, command interface. `renameInModule: true` also rewrites the references in `Module.bsl`; without it the run lists the module lines that must be fixed by hand. Element and handler names are not renamed by it.
+
+For an event handler or a command action that the form module does not declare yet, the run appends an empty procedure with the platform's signature and compilation directive to `Module.bsl` — only the body is left to write.
+
 ### Output
 
 ```
@@ -482,23 +503,38 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-form-validate
 
 ### Checks Performed
 
-| # | Check | Severity |
-|---|-------|----------|
-| 1 | Root element `<Form>`; `version` equals `Configuration.xml` when one is found above the form (else 2.17 / 2.20 expected) | ERROR / WARN |
-| 2 | `<AutoCommandBar>` present, id="-1" | ERROR |
-| 3 | Element ID uniqueness (separate pool) | ERROR |
-| 4 | Attribute ID uniqueness (separate pool) | ERROR |
-| 5 | Command ID uniqueness (separate pool) | ERROR |
-| 6 | Companion elements (ContextMenu, ExtendedTooltip, etc.) | ERROR |
-| 7 | DataPath → references existing attribute | ERROR |
-| 8 | Button CommandName → references existing command | ERROR |
-| 9 | Events have non-empty handler names | ERROR |
-| 10 | Commands have Action (handler) | ERROR |
-| 11 | No more than one MainAttribute | ERROR |
-| 12 | Type values — known namespaces and `cfg:` prefixes; `cfg:Catalogs.X` (export folder name) is an error | ERROR / WARN |
-| 12b | A default / auxiliary object, folder or record form of a catalog, document, chart, exchange plan, business process, task or information register has a main attribute of its owner's own type (`<Kind>Object.<Name>`, `InformationRegisterRecordManager.<Name>`); no `Description` / `Code` binding when the owner's length is 0 | ERROR |
-| 13 | Handlers in `Ext/Form/Module.bsl` — every event handler and command `Action` declared exactly once (duplicate = error); missing handler, missing directive, wrong context (`*AtServer` event on a client procedure, client event or command on a server one), more mandatory parameters than the platform passes — warnings | ERROR / WARN |
-| 14 | `РеквизитФормыВЗначение` / `ЗначениеВРеквизитФормы` only in `&НаСервере` (a procedure without a directive is server-side) | ERROR |
+Numbering follows the tool's own output; every `[ERROR]` / `[WARN]` line carries its number, so a finding is classified by its line, not by this table. `[ERROR]` sets the exit code to 1.
+
+| # | Check |
+|---|-------|
+| 1 | Root element `<Form>`; format version against the platform's known versions |
+| 2 | `<AutoCommandBar>` present, `id="-1"` |
+| 3 | Unique element / attribute / command IDs (separate pools) and names; a `DynamicList` attribute **without** `settings.mainTable` / `settings.query` is an error (local delta) |
+| 4 | Companion elements (ContextMenu, ExtendedTooltip, AutoCommandBar, …) |
+| 5 | `DataPath` references an existing attribute |
+| 6 | Button `CommandName` references an existing command |
+| 7 | Events have non-empty handler names |
+| 8 | Commands have `Action` |
+| 9 | At most one `MainAttribute` |
+| 10 | `Title` is multilingual XML, not plain text |
+| 11 | Extension-specific rules (borrowed form, `callType`, ID range, base-form references) |
+| 12 | Type values: known namespaces and `cfg:` prefixes. `cfg:Catalogs.X` — an export folder name where a type belongs — is an **error**, with the right reference type named as a hint (local delta) |
+| 12b | A default object / folder / record form's main attribute belongs to its owner (`<Kind>Object.<Name>`, `InformationRegisterRecordManager.<Name>`); no `Description` / `Code` binding when the owner's length is 0 (local delta) |
+| 13 | Prefixes used in type values are declared in the file (an undeclared prefix is an XDTO read error) |
+| 14 | Form format version against its **descriptor** and the dump (`Configuration.xml`) — mixed versions inside one object do not load |
+| 15 | Enum-valued element properties are platform values |
+| 16 | Element property order |
+| 17 | Dynamic-list settings on a compatibility mode below 8.3.19 |
+| 18 | Element tag matches its kind |
+| 19 | Element companions |
+| 20 | Element properties |
+| 21 | Element placement inside its container |
+| 22 | Handlers and command actions exist in `Ext/Form/Module.bsl` (error), borrowed-form scope, dead procedures (warning) |
+| 23 | Data-composition addition source |
+| 24 | Module variables against form attributes |
+| 25 | Conditional-appearance fields |
+| 26 | Handler **declarations** beyond check 22 (local delta): a duplicate declaration is an error, a missing compilation directive / wrong context (`*AtServer` event on a client procedure, client event or command on a server one) / more mandatory parameters than the platform passes are warnings |
+| 27 | `РеквизитФормыВЗначение` / `ЗначениеВРеквизитФормы` only in `&НаСервере`; a procedure without a directive is server-side in a form module and accepted (local delta) |
 
 ### Output
 
