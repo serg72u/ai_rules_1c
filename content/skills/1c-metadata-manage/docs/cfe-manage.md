@@ -148,6 +148,7 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-cfe-manage/sc
 | `Catalog.X.ManagerModule` | `Catalogs/X/Ext/ManagerModule.bsl` |
 | `Catalog.X.Form.Y` | `Catalogs/X/Forms/Y/Ext/Form/Module.bsl` |
 | `CommonModule.X` | `CommonModules/X/Ext/Module.bsl` |
+| `CommonForm.X` | `CommonForms/X/Ext/Form/Module.bsl` (the common form's own module) |
 
 Same shape for `Document`, `Report`, `DataProcessor`, `InformationRegister` and other types.
 
@@ -185,6 +186,8 @@ When the vendor changes the original, an `&ИзменениеИКонтроль`
 ```
 
 Narrow the scope with `-ModulePath` (one module) or `-ModulePath` + `-MethodName` (one method).
+
+`-Check` compares the **whole measured contract**, not just the body: the unmarked context of every controlled method, the **parameter list** of the interceptor against the original (a renamed or added vendor parameter is reported even when the body still matches) and its return type. BSL keywords are recognized in both spellings — a module written with `And` / `Or` / `Not` is handled exactly like the Russian `И` / `Или` / `НЕ`, so an English source dump neither breaks marker detection nor the drift key.
 
 | Status | Meaning |
 |--------|---------|
