@@ -289,6 +289,44 @@ Use `-Offset N` and `-Limit N` for paginated viewing.
 - Nested objects shown with suffix: `Contractors.StandardAttribute.PredefinedDataName`
 
 ---
+## 3a. Edit — Change an Existing Role in Place
+
+`role-edit` changes the rights of a role that already exists, keeping its UUID, its other rights, RLS and templates. Creating a role is still `role-compile` — it always writes a **new** role with a new UUID, so re-running it over an existing role is not an edit.
+
+```powershell
+powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-role-edit/scripts/role-edit.ps1 -RightsPath "Roles/МояРоль/Ext/Rights.xml" -Operation add-rights -Value "Catalog.Номенклатура: Read, View"
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `-RightsPath` | Role directory, `Roles/<Name>.xml` or `Roles/<Name>/Ext/Rights.xml` (required) |
+| `-Operation` | One operation from the table below |
+| `-Value` | Operation value; several values for one operation are separated by `;;` |
+| `-DefinitionFile` | JSON array of operations — the way to combine **different** operations in one run (applied in the order written) |
+| `-NoValidate` | Do not run `role-validate` afterwards |
+
+| Operation | `-Value` | Effect |
+|-----------|----------|--------|
+| `add-rights` | `Тип.Имя: Право1, Право2` or `Тип.Имя: @preset` | Add rights, keep the existing ones |
+| `set-rights` | same | Replace the object's whole right set |
+| `remove-rights` | `Тип.Имя: Право1, Право2` — drop those rights; `Тип.Имя` — drop the object | Remove |
+| `deny-rights` | `Тип.Имя: Право1, Право2` | Close an attribute or tabular section that would otherwise inherit the object's rights |
+| `set-rls` | `Тип.Имя.Право: условие` or `Тип.Имя.Право[Поле1, Поле2]: условие` | Row-level restriction |
+| `remove-rls` | `Тип.Имя.Право` — all rows; `Тип.Имя.Право[Поле1]` — one row | Drop the restriction, keep the right |
+| `add-template` / `set-template` | `Имя(Параметры): условие` | Add / replace (or add) a restriction template |
+| `remove-template` | `Имя(Параметры)` or `Имя` | Drop a template |
+| `modify-property` | `setForNewObjects=true`, `setForAttributesByDefault=false`, `independentRightsOfChildObjects=true` | Role-level flags |
+| `set-synonym` / `set-comment` | text | Role synonym / comment |
+
+Behaviour worth knowing:
+
+- **Rights equal to the role's default are not written** — the platform does not store them; a grant lives on the object, while a prohibition belongs to the attribute/tabular section that inherits it. The run lists such entries on stderr instead of leaving a silent no-op.
+- **`role-validate` runs after the write** and its verdict propagates: a role that fails validation exits non-zero, so a green run means the file is both written and valid. `-NoValidate` skips it.
+- **Vendor support gate** — a role of a typical configuration on vendor support is refused, like every other mutator; the reaction comes from `.dev.env SUPPORT_GUARD` (`.v8-project.json` `editingAllowedCheck` stays as the fallback). See [support-manage.md](support-manage.md).
+- An empty node left by a dropped prohibition is removed, and independent rights of child objects are the platform's, not the role's.
+
+---
+
 ## 3. Validate — Check Correctness
 
 Checks correctness of a role's `Rights.xml`: XML format, namespace, global flags, object types, right names, RLS restrictions, templates. The role metadata (UUID, name, synonym) is checked as well when `Roles/<RoleName>.xml` is found — it is located from the `Rights.xml` path, there is no parameter for it.
@@ -367,6 +405,7 @@ Exit code: `0` — no errors, `1` — errors found.
 
 ```
 1c-role-compile <RoleName> <RolesDir>                    — create role from description
+1c-role-edit -RightsPath <path> -Operation <op> -Value … — change an existing role in place
 1c-role-validate -RightsPath <path>                      — validate correctness
 1c-role-info <RightsPath>                                — analyze existing role before modification
 ```
