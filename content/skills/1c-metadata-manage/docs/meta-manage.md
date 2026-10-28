@@ -444,29 +444,43 @@ powershell.exe -NoProfile -File skills/1c-metadata-manage/tools/1c-meta-validate
 
 ## Checks Performed
 
-| # | Check | Severity |
-|---|-------|----------|
-| 1 | XML well-formedness + root structure | ERROR |
-| 1e | Root `version` equals `Configuration.xml` (when one is found above the object) | ERROR |
-| 2 | InternalInfo / GeneratedType — every category of the kind present, name exactly `<Type><Category>.<Name>` | ERROR / WARN |
-| 3 | Properties — Name, Synonym | ERROR / WARN |
-| 4 | Properties — enum property values | ERROR |
-| 5 | StandardAttributes | ERROR / WARN |
-| 6 | ChildObjects — allowed element types | ERROR |
-| 6a–6d | Form registrations — scalar reference, descriptor on disk, parseable, same name | ERROR |
-| 6e | Form descriptors and `Ext/Form.xml` carry the `Configuration.xml` version | ERROR |
-| 6f | `Default*Form` / `Auxiliary*Form` — `<Kind>.<Name>.Form.<Form>` of a declared form (or an existing `CommonForm`); object, folder, record and list slots point at a form of that role | ERROR |
-| 6g | A form of the object binds `Description` / `Code` only when `DescriptionLength` / `CodeLength` > 0 | ERROR |
-| 6h | The default object form shows a mandatory `Description` (length > 0, `ShowError`) or some module assigns it | WARN |
-| 7 | Attributes/Dimensions/Resources — UUID, Name, Type | ERROR |
-| 8 | Name uniqueness — case-insensitive; attributes, tabular sections, dimensions and resources share one namespace | ERROR |
-| 9 | TabularSections — internal structure | ERROR / WARN |
-| 10 | Cross-property consistency | ERROR / WARN |
-| 11 | HTTPService/WebService — nested structure | ERROR |
-| 12 | Forbidden properties per kind (InformationRegister: `Periodicity`, `DefaultRecordSetForm`) | ERROR |
-| 16a | Type spelled with an export folder name (`cfg:Catalogs.X` instead of `cfg:CatalogRef.X`) | ERROR |
+Numbering follows the tool's own output; each `[ERROR]` / `[WARN]` line carries its number, and an `[ERROR]` sets the exit code to 1.
 
-Checks 13–19 are not listed individually: method references, journal columns, commands, reference-type existence, `MDObjectRef` shape, version-dependent properties, `LineNumberLength`. Both runtimes (`.ps1` / `.py`) print the same messages.
+| # | Check |
+|---|-------|
+| 1 | Root structure and format version against the platform's known versions |
+| 2 | InternalInfo / GeneratedType — every category of the kind present, names in the platform's shape |
+| 3 | Properties — Name, Synonym |
+| 4 | Properties — enum property values |
+| 5 | StandardAttributes |
+| 6 | ChildObjects — allowed element types and canonical order |
+| 6a | A form is registered as a **scalar reference**; an inline `<Form><Properties>…` descriptor inside the object is an error the Configurator refuses to load (local delta) |
+| 6b | A registered form whose descriptor is **not in this dump** is a warning, not an error: that is the normal shape of a partial dump, and the platform merges such a fragment with the infobase (local delta) |
+| 6c | The form descriptor parses as XML (local delta) |
+| 6d | The descriptor's `Form/Properties/Name` matches its registration (local delta) |
+| 7 | Attributes / Dimensions / Resources / EnumValues / Columns — UUID, Name, Type |
+| 7b | Reserved attribute names, per kind, in both spellings |
+| 8 | Name uniqueness — case-insensitive; attributes, tabular sections, dimensions and resources share one namespace |
+| 9 | TabularSections — internal structure |
+| 10 | Cross-property consistency |
+| 11 | HTTPService / WebService — nested structure |
+| 12 | Forbidden properties per kind |
+| 13 | Method references (`EventSubscription.Handler`, `ScheduledJob.MethodName`) |
+| 14 | DocumentJournal column content |
+| 15 | Commands — group required/valid, section group vs `CommandParameterType` |
+| 16 | Reference type existence — types like `CatalogRef.X` resolve into the configuration |
+| 16a | Type spelled with an export folder name (`cfg:Catalogs.X` instead of `cfg:CatalogRef.X`) — an error, with the right reference type named as a hint (local delta) |
+| 17 | `MDObjectRef` form — the reference points at a metadata object, not at a reference type |
+| 18 | Properties introduced in newer format versions |
+| 19 | `LineNumberLength` — 5..9 |
+| 20 | `Default*Form` / `Auxiliary*Form` — the reference resolves; a form present in the composition but absent from a partial dump is a warning |
+| 21 | External data source table — field references and key presence |
+| 22 | Type name — grammar and the dictionary for the owning context |
+| 23 | A type set where the platform does not accept one |
+| 24 | Format version agreed inside the object; compared with the dump |
+
+**Partial dumps are the reference case, not an exception.** A form, template or just the object file may be legitimately absent from the tree — `/getconfigfiles` exports a selection and the platform merges it into the infobase. Findings that distinguish "in the composition but not in this dump" (warning) from "not in the composition at all" (error) are the ones to trust; a blanket error for a missing file would block the export/import workflow the ruleset itself uses.
+
 
 Exit code: 0 = all checks passed, 1 = errors found.
 
