@@ -354,6 +354,19 @@ In addition to the form-compile / form-info / form-add / form-edit / form-remove
 - **Presets** — `tools/1c-form-compile/presets/erp-standard.json` is shipped; project-level override at `<projectRoot>/presets/skills/form/<name>.json`.
 - **Defaults aligned with real ERP/БП forms** — multi-line inputs are not auto-width-bounded by default; checkbox title is on the right; `autoTitle` is suppressed when `title` is set; objects with editable state save the input state (`Esc → confirm`).
 
+### Upstream sync `2026-10-28` — `form-compile`
+
+`form-compile` v1.176 → **v1.217**. This one needed its own pass: upstream replaced the fork's hand-written event tables with a **generated event catalog** (`Get-FormEventCatalog`, built from 28.5k forms of the typical configurations and checked by loading into 8.3.24 / 8.3.27 / 8.5), added `callType` (`Before` / `After` / `Override`) for extension handlers, form-module handler stubs, and reworked the from-object presets. Fifteen conflicts, eleven of them semantic.
+
+Deltas kept (each marked `Local:` in the file):
+
+- the support-guard target is normalised for `-FromObject` (the real edit target is `Ext/Form.xml` inside the form directory) and resolved with `ProviderPath`;
+- an event name that is missing from the catalog is **refused** (`[ERROR] Unknown event … Known: …`, exit 1) instead of upstream's warning — a typo used to land in `Form.xml` and only surfaced when the Configurator opened the form;
+- the closed value sets of `windowOpeningMode` / `autoTime` / `usePostingMode` stay (upstream accepts any string and its spec listed values that do not exist — `Modeless`, `Current`, `Postings`, `Movements` — and the Configurator rejects such a `Form.xml` on load);
+- the canonical root-tag order (`$script:formRootTagOrder`) and the value table are both present.
+
+Verification: upstream harness **64/68** in isolation. The four remaining cases encode upstream's variants of our deltas (unknown event as a warning, enum value forgiveness) plus one preset property order and one catalog-warning case; our own `python-ports-regression` pins the parity that survived and records `form-compile.py` as lagging (see `docs/runtime-selection.md`).
+
 ### Upstream sync `2026-10-28` — the scaffolds and `form-compile`'s neighbours
 
 Source `662e752e`. `form-add` v1.12 → **v1.34**, `add-template` v1.10 → **v1.30**, `add-help` v1.9 → **v1.26**.

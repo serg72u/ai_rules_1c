@@ -90,10 +90,9 @@ recorded in `docs/CHANGELOG.md` → each `*Manage` section → "Upstream sync `2
 
 Two files are deliberately **not** at that commit:
 
-- `tools/1c-form-compile/scripts/form-compile.ps1` — still at the pin (v1.176). Upstream v1.217 is a
-  4 000-line rework of the same file with fifteen conflicts against the fork's own changes; it needs
-  its own pass and its own verification, not a tail-end merge. `form-compile.py` is the fork's own
-  port and is unaffected.
+- `tools/1c-form-compile/scripts/form-compile.ps1` — **now at v1.217 as well** (see the note below);
+  only its Python peer `form-compile.py` still carries the fork's v1.176 semantics, which is recorded
+  as a known divergence in `docs/runtime-selection.md`.
 - `tools/1c-form-scaffold/scripts/remove-form.ps1` — the fork's rewrite (identifier validation, path
   containment, `-DryRun` / `-Force`, a transaction whose deletions are reversible renames into a
   quarantine). Pinned by `tools/tests/python-ports-regression.py` and the metadata regression;
