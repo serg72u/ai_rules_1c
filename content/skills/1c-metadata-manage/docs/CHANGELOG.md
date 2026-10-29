@@ -75,11 +75,21 @@ The PowerShell scripts under `tools/1c-cf-manage/scripts/` were refreshed from [
 
 Source `662e752e`. `cfe-borrow` v1.12 → **v1.58**, `cfe-validate` v1.5 → **v1.31**, `cfe-init` v1.2 → **v1.13**, `cfe-diff` v1.0 → **v1.8**, `cfe-patch-method` v2.5 → **v2.14**.
 
-**`cfe-borrow` is the one file taken whole**, not merged hunk by hunk: v1.13…v1.58 is a rework of the very code the fork had patched (BaseForm indenting, choice-parameter link rewriting, adopted tabular sections, `RegisterRecords` and module handling, insertion order), and reconciling two implementations of one behaviour hunk by hunk would have produced a file neither side had ever tested. What the fork contributed conceptually is now upstream's: the byte-vs-character `Configuration.xml` fix, BaseForm indentation, by-name section selection, `newObjectPosition` ordering, the `RegisterRecords` stub, tabular-section column merging, dropped-link reporting.
+**`cfe-borrow` is upstream v1.58 taken whole, then the fork's contracts re-implemented on top.** v1.13…v1.58 is a rework of the very code the fork had patched (BaseForm indenting, choice-parameter link rewriting, adopted tabular sections, module handling, insertion order), so a hunk-wise merge of two implementations of one behaviour would have produced a file neither side had ever tested. What the fork contributed conceptually is now upstream's: the byte-vs-character `Configuration.xml` fix, BaseForm indentation, by-name section selection, `newObjectPosition` ordering, tabular-section column merging, dropped-link reporting.
 
-One public delta is **re-implemented on top of the upstream**: `-BorrowMainAttribute Only` — borrow the form with its main attribute and no cascade at all (the attribute set is empty, so the data paths into the object are stripped in both parts of the form). Three edits, each marked in the file: the validation accepts `Only`, `$borrowedNames` becomes an empty set, and the cascade step resolves no attributes.
+Re-implemented deltas, each marked `Local:` in the file and covered by `tools/tests/cfe-borrow-regression.ps1` (**13/13**):
+
+- `-BorrowMainAttribute Only` — the form is borrowed with its main attribute and **no cascade**: the borrowed attribute set is empty and every data path is stripped from both parts of the form (an empty binding root is passed to `Strip-FormBindings`). The validation accepts `Only` next to `Form` / `All`.
+- `<Type>` blocks of borrowed attributes and tabular-section columns are written the way the Configurator dump has them — one child element per line, one indent level deeper (`Format-TypeXml`); the form's own main attribute keeps its `<Type>` on a single line.
+- An element-level `CommandSet` (with its `ExcludedCommand` list) is kept in the form and in `BaseForm`; upstream drops every nested `CommandSet`.
+- No empty `Module.bsl` is created for a borrowed form, and no empty `Ext/Form` directory is left behind — the Configurator creates neither, and an empty module makes later `form-edit` / `remove-form` runs treat the module as existing.
+- A borrowed `Document` carries an empty `<RegisterRecords/>` after its properties.
+- References to styles that stayed in the source configuration are stripped from `AutoCommandBar`, `ChildItems` and the form properties (platform style items such as `ImportantColor` stay), so the extension does not fail to load with «элемент стиля не найден».
+- An unknown sub-object is refused with a single-line `[ERROR] Source attribute not found: <name>` on stderr — `Write-Error` wrapped the line and prefixed the script path, which broke the operator-facing text.
 
 Delta dropped: the internal `-BorrowMainMode` / `-KeepObjektBindings` switches (undocumented, superseded by upstream's `$mainAttrName` model).
+
+The upstream harness for this tool reports **18/65**: the other 47 cases encode upstream's own variants of the behaviours above (multi-line form-attribute `<Type>`, mandatory `Module.bsl`, `CommandSet` stripping, different `RegisterRecords` handling). Our contract suite is the authority here — it encodes what our projects load and what the Configurator writes.
 
 `cfe-validate` / `cfe-init` / `cfe-diff` keep the `.dev.env` platform chain and the sibling-validator dispatch; the new checks of v1.31 (form path roots, `AdditionalColumns`) are in.
 

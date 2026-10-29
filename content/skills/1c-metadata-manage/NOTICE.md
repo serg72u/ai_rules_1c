@@ -99,8 +99,11 @@ Two files are deliberately **not** at that commit:
   quarantine). Pinned by `tools/tests/python-ports-regression.py` and the metadata regression;
   upstream's later fixes are either present in the rewrite or superseded by it.
 
-`cfe-borrow.ps1` is upstream v1.58 taken whole (its rework subsumed the fork's patches), with the
-fork's `-BorrowMainAttribute Only` mode re-implemented on top; see `docs/CHANGELOG.md` →
+`cfe-borrow.ps1` is upstream v1.58 with the fork's behavioural contracts re-implemented on top
+(`-BorrowMainAttribute Only`, `<Type>` block formatting, element `CommandSet` retention, no empty
+`Module.bsl`, `<RegisterRecords/>` for documents, stripping of references to unborrowed styles,
+single-line sub-object diagnostics). The upstream suite for that tool reports 18/65: the remaining
+47 cases encode upstream's own variants of those behaviours. See `docs/CHANGELOG.md` →
 `cfe-manage.md`.
 
 ### MIT licence text
