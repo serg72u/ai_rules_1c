@@ -12,7 +12,7 @@ Use this skill when the task involves **1C metadata structure** (creating, editi
 The gate itself — every metadata-XML mutation and every infobase operation goes through this skill (dispatch below → domain doc → PowerShell tools) or the `1c-metadata-manager` subagent, hand-editing is a defect, repository-bound projects add the `1c-repository-manage` lock / commit discipline, EDT-format trees (`.mdo` / `.form`, never fed to these tools) route per `content/rules/edt-workflow.md` — is owned by `AGENTS.md → Skills and Subagents`; this skill's own canon is only the exceptions:
 
 - **Unambiguous one-line fix** of an existing value that cannot break structure — a synonym / comment typo, a boolean flag flip on an existing element. Anything that adds / removes / reorders elements, touches UUIDs, or spans more than one line of XML is not "one-line".
-- **Rights-only change to an existing role** — adding or changing `<object>` / `<right>` entries of its `Ext/Rights.xml`. No tool edits a role in place (`role-compile` writes a new role with a new UUID), so edit `Rights.xml` by the templates of [role-manage.md](docs/role-manage.md), leave the role's own `.xml`, its UUID and the other entries as they are, then run `role-validate`. A locked role of a configuration on vendor support is not hand-edited either — [support-manage.md](docs/support-manage.md).
+- **Rights-only change to an existing role** — adding or changing `<object>` / `<right>` entries of its `Ext/Rights.xml` is `role-edit` (see [role-manage.md](docs/role-manage.md) → *3a. Edit*): it keeps the role's UUID and every entry the operation does not name, and runs `role-validate` afterwards. Hand-editing `Rights.xml` is the fallback only when the tool is not exposed in the session — then follow the templates of [role-manage.md](docs/role-manage.md), leave the role's own `.xml`, its UUID and the other entries as they are, and run `role-validate`. A locked role of a configuration on vendor support is refused by both paths — [support-manage.md](docs/support-manage.md).
 - **Skill not available in the session** (files not installed / not exposed) — state it once in one line, then hand-edit with `metadata-xml-workarounds.md` loaded and validate per `verification-gates.md → Gate 5`.
 - **Read-only analysis** of metadata XML is not a mutation — reading files directly is fine (subject to `mcp-first-search.md` for locating them).
 
@@ -34,6 +34,8 @@ The same convention applies to `docs/*.md` references like `skills/1c-metadata-m
 XML saving in `form-edit`, `form-add`, `remove-form`, `form-compile` registration, `meta-edit`, `cf-edit`, `cfe-borrow` registration/merge, `skd-edit`, `subsystem-edit`, `subsystem-compile` registration, `interface-edit`, `add-template` and `add-help` retains the input CRLF/LF style and uses Configurator's compact empty tags (`<Tag/>`). Formatting-only changes should not be repaired by a global replacement that can alter literal XML in comments or CDATA.
 
 On Windows use the shipped `.ps1` entry points. Before selecting a Linux/macOS runtime, using a Python port, or resolving a missing runtime, read [runtime-selection.md](docs/runtime-selection.md) for the exact supported commands and limitations. A missing runtime never permits hand-editing metadata XML.
+
+The shipped Python entry points are `form-compile.py`, `form-add.py`, `remove-form.py`, `meta-edit.py`, `meta-validate.py`, `web-publish.py`, `web-info.py`, `web-stop.py` and `web-unpublish.py` — the same parameters and contract as their `.ps1` peer, and the only commands that exist without Windows. `tools/_common/dev_env.py` and `tools/1c-web-ops/scripts/web_common.py` are shared helpers, not entry points; every other tool is PowerShell-only and needs Windows or `pwsh` (PowerShell 7 is supported — a definition is read the same way under 5.1 and 7).
 
 ## Logical addressing and optional preview
 
@@ -71,7 +73,7 @@ The subagent already knows how to read the skill docs, execute PowerShell script
 | Form-compile DSL reference — full JSON DSL spec for `1c-form-compile`, `--from-object` mode, presets | [form-compile-dsl.md](docs/form-compile-dsl.md) |
 | Data Composition Schema (DCS/SKD) — create, edit, analyze, decompile, validate | [skd-manage.md](docs/skd-manage.md) |
 | Spreadsheet documents (MXL) — create, decompile, analyze, validate | [mxl-manage.md](docs/mxl-manage.md) |
-| Roles and access rights — create, analyze, validate | [role-manage.md](docs/role-manage.md) |
+| Roles and access rights — create, edit in place, analyze, validate | [role-manage.md](docs/role-manage.md) |
 | External processors/reports (EPF/ERF) — scaffold, build, dump, validate | [epf-manage.md](docs/epf-manage.md) |
 | BSP/SSL registration and commands | [bsp-manage.md](docs/bsp-manage.md) |
 | Configuration (CF) and complete dump integrity (CF/CFE) — create, edit, analyze, validate | [cf-manage.md](docs/cf-manage.md) |

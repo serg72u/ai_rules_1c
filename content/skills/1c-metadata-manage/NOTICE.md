@@ -82,6 +82,27 @@ Other tool commands remain PowerShell-only. The upstream pin above is not to be 
 - the PowerShell tool scripts under `tools/` synced from the same upstream
   (per-tool versions and local changes: `docs/*.md`, section "Upstream sync").
 
+**Exception — the PowerShell tree is taken from a later upstream commit.** The upstream pin above
+is not advanced, because it describes the tree and not a handful of files. Every PowerShell tool
+script under `tools/` was re-synced from `662e752e` (2026-10-28) instead, keeping the fork's deltas
+file by file; the per-family versions, the deltas that were kept and the ones this port dropped are
+recorded in `docs/CHANGELOG.md` → each `*Manage` section → "Upstream sync `2026-10-28`".
+
+Two files are deliberately **not** at that commit:
+
+- `tools/1c-form-compile/scripts/form-compile.ps1` — still at the pin (v1.176). Upstream v1.217 is a
+  4 000-line rework of the same file with fifteen conflicts against the fork's own changes; it needs
+  its own pass and its own verification, not a tail-end merge. `form-compile.py` is the fork's own
+  port and is unaffected.
+- `tools/1c-form-scaffold/scripts/remove-form.ps1` — the fork's rewrite (identifier validation, path
+  containment, `-DryRun` / `-Force`, a transaction whose deletions are reversible renames into a
+  quarantine). Pinned by `tools/tests/python-ports-regression.py` and the metadata regression;
+  upstream's later fixes are either present in the rewrite or superseded by it.
+
+`cfe-borrow.ps1` is upstream v1.58 taken whole (its rework subsumed the fork's patches), with the
+fork's `-BorrowMainAttribute Only` mode re-implemented on top; see `docs/CHANGELOG.md` →
+`cfe-manage.md`.
+
 ### MIT licence text
 
 ```

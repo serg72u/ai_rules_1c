@@ -1,4 +1,4 @@
-# 1c-metadata-manage — sync history of the vendored scripts
+﻿# 1c-metadata-manage — sync history of the vendored scripts
 
 The PowerShell tools under `tools/` are vendored from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (MIT). This file holds the per-document sync notes that used to close each `docs/*.md` (what each upstream sync changed, what was cross-checked and what stays deliberately local). It is maintainer history — nothing loads it during a task; the operational description of every tool lives in the domain doc named by each heading.
 
@@ -21,6 +21,15 @@ The upstream `cc-1c-skills` skills `epf-bsp-init` and `epf-bsp-add-command` are 
 No script files were brought into `tools/` — the operations are pure module-text edits performed by the agent, which is how upstream ships them as well.
 
 ## cf-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `cf-edit` v1.12 → **v1.31**, `cf-init` v1.3 → **v1.17**, `cf-validate` v1.4 → **v1.13**, `cf-info` v1.4 → **v1.10**.
+
+Deltas kept: the `.dev.env SUPPORT_GUARD` gate ahead of `.v8-project.json` `editingAllowedCheck`; `NEW_OBJECT_POSITION` from `.dev.env` inside upstream's own `Get-NewObjectPosition` (a set key decides by itself, an unrecognised value means `end`); the auto-validation call to the sibling `cf-validate.ps1` in the same `scripts` directory, with the validator's exit code propagated; processing instructions kept literal by the shared `Finalize-XmlText`.
+
+Delta **dropped**: the fork's own `$byName` / `Test-OrderSensitiveType` ordering block. Upstream implements the same `newObjectPosition` ordering, including the order-sensitive kinds, and the two implementations cannot coexist in one file.
+
 
 ### Local fix `2026-10-19` — `add-childObject` follows `NEW_OBJECT_POSITION`
 
@@ -61,6 +70,29 @@ The PowerShell scripts under `tools/1c-cf-manage/scripts/` were refreshed from [
 - Platform 8.5 support — new compatibility-mode and interface-mode values plus the new XML header format. (Same upgrade in `cfe-validate`, `epf-validate`, `skd-validate`.)
 
 ## cfe-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `cfe-borrow` v1.12 → **v1.58**, `cfe-validate` v1.5 → **v1.31**, `cfe-init` v1.2 → **v1.13**, `cfe-diff` v1.0 → **v1.8**, `cfe-patch-method` v2.5 → **v2.14**.
+
+**`cfe-borrow` is the one file taken whole**, not merged hunk by hunk: v1.13…v1.58 is a rework of the very code the fork had patched (BaseForm indenting, choice-parameter link rewriting, adopted tabular sections, `RegisterRecords` and module handling, insertion order), and reconciling two implementations of one behaviour hunk by hunk would have produced a file neither side had ever tested. What the fork contributed conceptually is now upstream's: the byte-vs-character `Configuration.xml` fix, BaseForm indentation, by-name section selection, `newObjectPosition` ordering, the `RegisterRecords` stub, tabular-section column merging, dropped-link reporting.
+
+One public delta is **re-implemented on top of the upstream**: `-BorrowMainAttribute Only` — borrow the form with its main attribute and no cascade at all (the attribute set is empty, so the data paths into the object are stripped in both parts of the form). Three edits, each marked in the file: the validation accepts `Only`, `$borrowedNames` becomes an empty set, and the cascade step resolves no attributes.
+
+Delta dropped: the internal `-BorrowMainMode` / `-KeepObjektBindings` switches (undocumented, superseded by upstream's `$mainAttrName` model).
+
+`cfe-validate` / `cfe-init` / `cfe-diff` keep the `.dev.env` platform chain and the sibling-validator dispatch; the new checks of v1.31 (form path roots, `AdditionalColumns`) are in.
+
+
+### Upstream sync `2026-10-28` — `cfe-patch-method` v2.5 → **v2.14**
+
+Source `662e752e` (same commit as the tier-1 database tools). **No local deltas**: the vendored copy was byte-identical to the pinned script, so this is a plain refresh plus `-Check`/`-Actualize` behaviour that the docs already promised but the old script did not deliver.
+
+- `-Check` now compares the **parameter list** and the return type of every controlled method against the current original, not only the unmarked body — a vendor parameter rename is caught while the body still matches.
+- The comparison key follows the platform's measured rule (case-insensitive marker counter; the marker line is returned unchanged), so a re-run no longer reports phantom drift.
+- BSL keywords are recognized in both spellings (`And`/`Or`/`Not` beside `И`/`Или`/`НЕ`), including `Или` inside the keyword table.
+- Interception of a **common form's own module** is supported: `-ModulePath "CommonForm.<Name>"`.
+- Borrowed-object modules and the extended-property mark are handled by `cfe-borrow`/`cfe-validate` in the same family.
 
 ### Local fix `2026-10-28` — choice-parameter and type-link paths
 
@@ -125,6 +157,38 @@ An extension is the **default answer** when a typical object on vendor support n
 
 ## db-manage.md
 
+### Upstream sync `2026-10-28` — the rest of the family
+
+Source `662e752e`. `db-create` v1.10 → **v1.21**, `db-dump-cf` v1.12 → **v1.23**, `db-dump-dt` v1.11 → **v1.22**, `db-load-cf` v1.13 → **v1.25**, `db-load-dt` v1.12 → **v1.23**, `db-run` v1.7 → **v1.16** (the four tools of the first pass are described above).
+
+The same two deltas as the first pass: `.dev.env` (`PLATFORM_ARGS` / `IBCMD_ARGS` / `PLATFORM_PATH`) ahead of `.v8-project.json`, and `PLATFORM_PATH` accepted in the install-directory shape with the `bin\1cv8.exe` fallback. Upstream's own change of this release — the database record's `v8path` wins over the root one, which is why six scripts now consult `Find-ProjectDatabase` first — is kept.
+
+
+### Upstream sync `2026-10-28` — the four tier-1 database tools
+
+Source: `Nikolay-Shirokov/cc-1c-skills` at `662e752e` (2026-10-28), three months of commits past the `ecd289fe` pin. Ported by three-way merge (`git merge-file`, base = the pinned script), one tool at a time, with every local delta re-applied on top. Versions: `db-dump-xml` v1.14 → **v1.29**, `db-load-xml` v1.19 → **v1.38**, `db-load-git` v1.18 → **v1.36**, `db-update` v1.14 → **v1.28**.
+
+Why these four first: they are on the hot path of every project, EDT included — `/loadfrom1cbase`, `/getconfigfiles`, `/update1cbase` and `/deploy-and-test` drive them regardless of source format, unlike the XML metadata tools.
+
+Behaviour that changed for our workflows:
+
+- **Platform launch** — the platform is awaited until it exits, not until its pipes close; inherited descriptors are passed explicitly; a failure *before* the launch is no longer reported as success; a batch command embedded in `AdditionalV8Arguments` is rejected instead of silently swallowing the real one.
+- **`db-dump-xml -Mode Changes`** — no `-force` any more: a dump-format-version mismatch surfaces as a platform refusal instead of a silent full re-dump that the caller reads as an incremental export. An object list (`-Objects` / `-ObjectsFile`) makes the run partial by itself.
+- **`db-load-xml`** — `-Files` / `-ListFile` imply `Partial`; `-AllExtensions` with a partial load is refused on both engines; after an extension load the platform is asked whether the extension is applicable (`/CheckCanApplyConfigurationExtensions`, separate launch — one command line executes only its last batch command).
+- **`db-load-git -DryRun`** — warns about deletions a partial load cannot apply (and exits non-zero when they are the only changes), and warns that a `Configuration.xml` in the list means a full load.
+- **Registry/`.v8-project.json` (not used here)** — `-RepositoryPath/User/Password`, `-ObjectsFile`, per-database `v8path`, `v8args`; new `-StrictLog` / `-NoApplyCheck` switches. `.dev.env` still wins over the registry (below).
+
+Local deltas re-applied (unchanged in intent from `NOTICE.md`): `.dev.env` first in the extra-args lookup (`PLATFORM_ARGS` / `IBCMD_ARGS`) and in the v8path lookup (`PLATFORM_PATH`); `PLATFORM_PATH` accepting the install directory with a `bin\1cv8.exe` fallback; `/DumpResult` appended to every batch launch and read as the batch verdict next to the exit code.
+
+Local deltas re-worked:
+
+- **`db-update` silent rejections** — upstream replaced the fork's own pattern scan with `Find-SilentRejections` (a wider list, minus the generic `Ошибка обновления конфигурации базы данных` header, and gated on `-StrictLog`). The wider list and the new extension apply-check are taken; the generic header is re-added, and the fork's **hard** escalation is kept — a log rejection fails the run regardless of `-StrictLog`. Verified: the doc and `designer-batch-checks.md` promise a non-zero verdict, so a warning-only path would have been a regression.
+- **`db-update -Dynamic auto|disable`** — dropped. Upstream's own fix accepts `on` / `off` / `yes` / `no`, so the `-File`-safe spelling exists upstream (`-Dynamic off` → `-UpdateDBCfg -Dynamic-`, checked on 8.3.27). Two spellings for one thing is worse than one.
+
+Verification (real platform, 8.3.27.2130, throwaway file base in the scratch directory): PowerShell parse of all four scripts; `db-create` → `db-dump-xml -Mode Full` → `db-load-xml -Mode Full -UpdateDB` → `db-update -Dynamic off`, all exit 0 with the `/DumpResult` verdict read; `db-load-git -DryRun` on a fixture git repo exercised the `Configuration.xml` full-load warning and the deletion warning + refusal. `.dev.env` resolution was exercised implicitly (no `-V8Path` passed, `PLATFORM_PATH` came from the project). No db tool has a Python port, so `tools/tests/python-ports-regression.py` is unaffected.
+
+The `NOTICE.md` pin stays at `ecd289fe`: the other 64 scripts were not re-synced, and a pin is a property of the tree, not of four files. Their source commit is recorded in `NOTICE.md` per file.
+
 ### Local fix `2026-10-20` — `-Dynamic` takes `auto` / `disable`
 
 `db-update` v1.13 → **v1.14** (support ticket 7557c7cf): through `powershell.exe -File` a lone `-Dynamic "-"` never reaches the script — Windows PowerShell 5.1 exits with a non-zero code and no output, so the agent saw a silent failure instead of `/UpdateDBCfg -Dynamic-`. `-Dynamic` now also accepts `auto` and `disable` (the ibcmd spellings), mapped to `+` / `-`; `+` / `-` keep working in-process, and `-Dynamic:-` works through `-File` as well. Checked on a throwaway 8.3.27.2130 file base: `-File … -Dynamic disable` → `-Dynamic-`, `auto` → `-Dynamic+`, both exit 0.
@@ -142,6 +206,15 @@ The PowerShell scripts under `tools/1c-db-ops/scripts/` were refreshed from [Nik
 - **db-list** — already fully described in Part 1 of this doc (registry of `.v8-project.json`). It is a no-script skill in upstream — the agent reads / writes the JSON directly. No script files were added under `tools/`.
 
 ## epf-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `epf-build` v1.12 → **v1.26**, `epf-dump` v1.11 → **v1.22**, `epf-validate` v1.2 → **v1.11**, `epf-init` v1.1 → **v1.9**, `erf-init` v1.1 → **v1.9**.
+
+Deltas kept: the `.dev.env` platform chain in the three `epf-*` tools; the PowerShell-7-safe stub launcher (`$psExe` — `pwsh` under Core) in `epf-build`, on top of upstream's reworked wait (the stub itself is awaited, not `-Wait` on a process tree that a leftover crashpad child would hold); `-FormatVersion` and the fork's `-BspForms` switch side by side in `erf-init`.
+
+Upstream absorbed the fork's save pipeline in `epf-init` / `erf-init` (`write_xml_file` / `write-bom` helpers).
+
 
 ### Local fix `2026-10-07` — common forms in external reports
 
@@ -170,6 +243,35 @@ The PowerShell script `tools/1c-epf-validate/scripts/epf-validate.ps1` was refre
 - The same script handles `erf-validate` — upstream `erf-validate` is a thin pass-through to `epf-validate.ps1`, the script auto-detects `ExternalReport` vs `ExternalDataProcessor` from the root XML element. No separate `erf-validate.ps1` is shipped.
 
 ## form-manage.md
+
+### Upstream sync `2026-10-28` — `form-info`
+
+Source `662e752e`. `form-info` v1.5 → **v1.14**. No local delta beyond the processing-instruction branch of the shared compact-tag writer.
+
+
+### Upstream sync `2026-10-28` — `form-edit` v1.6 → **v1.39**, `form-validate` v1.10 → **v1.36**
+
+Source `662e752e`. Both tools grew far past the pin (form-edit 1 549 → 9 535 lines: the element emitter is now shared with `form-compile`, a per-element event catalogue with handler stubs, `set`/`rename`/`remove` operations, form properties, conditional appearance, command interface).
+
+Local deltas dropped as **superseded** by upstream — each one is now upstream behaviour, verified against the new code:
+
+- the event-suffix map and `knownEvents` additions (`OnEditEnd` → `ПриОкончанииРедактирования`, `Selection` → `Выбор`, `DragEnd`, `Tuning`, `StartListChoice`): upstream ships a per-element event catalogue with the Russian names, signatures and stub generation;
+- button/command child order and `Command.Representation = TextPicture`: upstream has `childTagOrder` / `formRootTagOrder` tables and per-element enumeration maps with the `PictureAndText ↔ TextPicture` aliases;
+- the `Module.bsl` handler check (local 13): upstream **Check 22** does it better — events, command actions, borrowed-form scope, dead-code warnings.
+
+Local deltas kept:
+
+- `.dev.env SUPPORT_GUARD` before `.v8-project.json` `editingAllowedCheck` (vendor support gate) — verbatim from the other mutators.
+- form-edit's **DynamicList source refusal**: a `DynamicList` attribute with neither `settings.mainTable` nor `settings.query` is still rejected before writing. Upstream fills a `MainTable` heuristically but never refuses the empty case, and the form does not open.
+- form-validate **Check 12**: `cfg:Catalogs.X` — an export folder name where a type belongs — is an error, not an "unrecognized prefix" warning.
+- form-validate **Check 12b**: the main attribute of a default object / record form belongs to the owner; a zero-length `Description` / `Code` is not bound.
+- form-validate **Check 26** (was 13): duplicate declaration (error), missing compilation directive, wrong context and handler arity. The "handler not found" branch was **removed** so Check 22's finding is not reported twice.
+- form-validate **Check 27** (was 14): `РеквизитФормыВЗначение` / `ЗначениеВРеквизитФормы` require the form context on the server.
+- form-edit **compact empty tags in literal XML text** — upstream's writer compresses ` />` → `/>` and protects CDATA and comments but **not** processing instructions, so a `<?…<Tag />…?>` was rewritten. The fork's alternation keeps `<?…?>` as well; without it the port silently reintroduced the defect our own regression case pins (it caught this one).
+
+Verification: upstream's own snapshot harness (`tests/skills/runner.mjs`, PowerShell runtime) run against the ported files in a hybrid skills tree — `form-edit` **117/117**, `form-validate` **58/58** (2 skipped by fixture prerequisites). Five extra cases authored for the kept deltas (DynamicList without source, duplicate handler, client-context conversion, export-folder type, client event on a server procedure) pass alongside them: **63/63**.
+
+`tools/tests/metadata-tools-regression.ps1` needed its `form-validate` case updated to the new contract — the handler checks are now numbered 26 / 27, a missing handler is **Check 22's error** rather than a warning (the platform raises "method not found" when the form opens), and the format-version finding names the form descriptor instead of `Configuration.xml`. The compact-tag case (`form-edit` inside a processing instruction) stayed as it was and is what exposed the missing delta above.
 
 ### Local fix `2026-10-14` — input-field events and pass-through keys
 
@@ -242,6 +344,24 @@ In addition to the form-compile / form-info / form-add / form-edit / form-remove
 - **Presets** — `tools/1c-form-compile/presets/erp-standard.json` is shipped; project-level override at `<projectRoot>/presets/skills/form/<name>.json`.
 - **Defaults aligned with real ERP/БП forms** — multi-line inputs are not auto-width-bounded by default; checkbox title is on the right; `autoTitle` is suppressed when `title` is set; objects with editable state save the input state (`Esc → confirm`).
 
+### Upstream sync `2026-10-28` — the scaffolds and `form-compile`'s neighbours
+
+Source `662e752e`. `form-add` v1.12 → **v1.34**, `add-template` v1.10 → **v1.30**, `add-help` v1.9 → **v1.26**.
+
+Deltas kept in `form-add`: the `-FormName` identifier gate (Phase 0 — the name becomes a file name, a directory name and an XPath literal), the `.dev.env SUPPORT_GUARD` gate, and **XML escaping of `-FormName` / `-Synonym`** in the generated descriptor. The escaping is not cosmetic: upstream interpolates the values verbatim, so an ordinary synonym `A & B` produced a descriptor no parser accepts — our own regression case caught it after the port.
+
+Delta **dropped** in `form-add`: the fork's "an information register's object form names its main attribute `Запись`". Upstream now carries a per-kind purpose table where the register purposes are `Custom` / `List` / `Record` / `RecordSet` — the record form is `Record` with `AttrName = "Запись"`, and `-Purpose Object` is refused for a register naming the allowed values. The fork's rule became wrong, not redundant.
+
+`add-template` / `add-help`: upstream absorbed the fork's whole save pipeline (MemoryStream post-processing, BOM strip, uppercase `UTF-8`, compact tags, target-EOL detection); only the processing-instruction branch had to be re-added.
+
+**`form-remove` (v1.4) is deliberately not re-synced.** The fork rewrote the tool — identifier validation, path containment, `-DryRun` / `-Force`, and a bounded transaction whose deletions are reversible renames into a quarantine — and that rewrite is pinned by `tools/tests/python-ports-regression.py` and by the metadata regression. Upstream's v1.5–v1.11 fixes (reference check before deletion, unified XML finalisation) are present in the rewrite or superseded by it.
+
+Verification: `form-add` **30/30** in the upstream harness, the compact-tag suite **11/11** (covers `form-add`, `remove-form`, `form-compile` registration, `add-template`, `add-help`, `skd-edit`), metadata regression **62/62**.
+
+### Cross-cutting fix `2026-10-28` — a JSON definition under PowerShell 7
+
+Six scripts read their JSON definition through `Write-Output -NoEnumerate $parsed`. Under PowerShell 7 that wraps a **non-array** in a `List<object>`, so the caller's `$def.PSObject.Properties` enumerated `List` members (`Capacity`, `Count`, …) instead of the JSON keys and every operation was reported as `Unknown operation: Capacity`. Windows PowerShell 5.1 returns the object unchanged, which is why the idiom survived. Fixed in `meta-edit`, `meta-compile`, `form-edit`, `role-edit`, `skd-compile`, `skd-decompile`: only arrays take the `-NoEnumerate` path. The harness runs `pwsh` first, so it is what surfaced here; `docs/runtime-selection.md` now states that PowerShell 7 is supported.
+
 ## help-manage.md
 
 ### Upstream sync `2026-07-30`
@@ -249,6 +369,13 @@ In addition to the form-compile / form-info / form-add / form-edit / form-remove
 Script refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `help-add` v1.4 → **v1.9**. It now enforces the vendor support gate — adding help to a locked object of a typical configuration is refused with a pointer to `support-edit` ([support-manage.md](support-manage.md)).
 
 ## interface-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `interface-edit` v1.8 → **v1.24**, `interface-validate` v1.1 → **v1.6**.
+
+Deltas kept: the `.dev.env SUPPORT_GUARD` gate, the sibling validator in `$PSScriptRoot` with its exit code propagated, processing instructions kept literal. Upstream's target-EOL detection — an edit inherits the destination's line endings — replaces the fork's own: same rule, one implementation.
+
 
 ### Upstream sync `2026-07-30`
 
@@ -261,7 +388,35 @@ The PowerShell scripts under `tools/1c-interface-manage/scripts/` were refreshed
 - **`interface-edit`** — operations `place` / `order` accept the value as an object (not only as a string). Command names in `hide` / `show` / `place` / `order` are normalised: `Catalogs.X` and `Справочник.X` map to canonical `Catalog.X`.
 - **`interface-validate`** — universal validator improvements (one-liner output by default, `-Detailed`, folder path auto-resolution) — see `role-manage.md` → "Recent Additions".
 
+
 ## meta-manage.md
+
+### Upstream sync `2026-10-28` — `meta-remove`
+
+Source `662e752e`. `meta-remove` v1.5 → **v1.15**, keeping the `.dev.env SUPPORT_GUARD` gate.
+
+
+### Upstream sync `2026-10-28` — the `meta-*` family
+
+Source `662e752e`. Versions: `meta-compile` v1.69 → **v1.124**, `meta-edit` v1.24 → **v1.70**, `meta-validate` v1.13 → **v1.42**, `meta-info` v1.4 → **v1.16** (no local deltas — plain refresh).
+
+Deltas kept, re-applied on the new bodies:
+
+- `.dev.env SUPPORT_GUARD` before `.v8-project.json` `editingAllowedCheck` in `meta-compile` and `meta-edit`.
+- `.dev.env NEW_OBJECT_POSITION` before the registry's `newObjectPosition` in `meta-compile`, with the fork's semantics restored: a value that is **set** decides on its own, and an unrecognized value resolves to the documented `end` rather than silently handing the ordering to the fallback file.
+- `meta-edit` auto-validation: the sibling validator is resolved under the fork's directory names (`1c-meta-validate`, `1c-epf-validate` for external objects), a **missing** validator is a refusal raised before the write, and the validator's exit code propagates as the run's verdict (with an explicit stderr line naming the code).
+- `meta-edit` compact empty tags: processing instructions are kept literal (`<?…?>`), as in `form-edit` — upstream protects CDATA and comments only.
+- `meta-validate`: **6a** (an inline `<Form><Properties>` descriptor where a scalar reference belongs), **6c** (descriptor does not parse), **6d** (descriptor name differs from its registration), **16a** (export folder name where a type belongs).
+
+Deltas **dropped** because the ported fixtures showed them to be wrong, not merely redundant. Each was written against v1.12 and fired on dumps the platform accepts:
+
+- **1e / 6e** (format version must equal `Configuration.xml`) — a 2.18 object inside a 2.20 dump is a routine merge-branch artefact and the platform loads it; upstream's check 24 reports it as the warning it is. Ours turned it into a hard error.
+- **6f** (`Default*Form` must name a declared form) — upstream's check 20 already resolves those references and distinguishes "in the composition, not in this dump" (warning) from "absent altogether" (error); it also accepts a UUID reference, which ours rejected.
+- **6b as an error** — kept, but **downgraded to a warning**: a registered form whose descriptor is missing is the normal shape of a partial dump (`/getconfigfiles` exports a selection, the platform merges it), so a hard error blocked the workflow the ruleset itself prescribes.
+- **2's "name exactly `<Type><Category>.<Name>`"** — external data source tables carry the source name (`ExternalDataSourceTableManager.PG.prices`), so the exact-name rule rejected valid objects.
+- **8 / 12 / 6g / 6h** — superseded: upstream's case-insensitive shared namespace for attributes, tabular sections, dimensions and resources, its per-kind enum tables and its `Description` / `Code` handling cover the same ground with the platform's own rules.
+
+Verification against upstream's own snapshot harness (hybrid skills tree, PowerShell runtime): `meta-compile` **122/123**, `meta-edit` **59/62**, `meta-validate` **77/80** (3 skipped) plus five authored cases for the kept deltas (**5/5**), `meta-info` **29/39** (10 skipped by fixture prerequisites). The failures are accounted for: `meta-compile` / `meta-edit` each have one **LF-preservation** case that cannot pass in a checkout with `core.autocrlf=true` (the LF fixture arrives as CRLF; the fork's own LF handling was verified directly — an LF object keeps LF, 0 CRLF, BOM intact, with the edit applied), and `meta-edit` has two snapshot diffs where the fork deliberately writes `<Name>` and `<Synonym>` on separate lines (the whitespace fix of 2026-09); those snapshots are upstream's, not ours.
 
 ### Local fix `2026-09-25` — versions, generated types, default forms, name clashes
 
@@ -314,6 +469,13 @@ The PowerShell scripts under `tools/1c-meta-{compile,edit,info,remove,validate}/
 
 ## mxl-manage.md
 
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `mxl-compile` v1.4 → **v1.59**, `mxl-decompile` v1.0 → **v1.32**, `mxl-info` v1.2 → **v1.7**, `mxl-validate` v1.1 → **v1.10**.
+
+`mxl-compile` keeps the `.dev.env SUPPORT_GUARD` gate; the other three had no local delta and were replaced outright. The refresh brings `mxl-decompile`'s newer lossless model (cell formats, merged and named areas) that `mxl-compile` reads back.
+
+
 ### Upstream sync `2026-07-30`
 
 Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `mxl-compile` v1.1 → **v1.4**, `mxl-info` v1.0 → **v1.2**; `mxl-decompile` / `mxl-validate` unchanged. `mxl-compile` enforces the vendor support gate ([support-manage.md](support-manage.md)); `mxl-info` prints the support state of the layout's owner.
@@ -327,6 +489,24 @@ The PowerShell script `tools/1c-mxl-validate/scripts/mxl-validate.ps1` was refre
 The compile/decompile/info scripts (`mxl-compile`, `mxl-decompile`, `mxl-info`) were not refreshed — no significant upstream changes for them in this period.
 
 ## role-manage.md
+
+### Upstream sync `2026-10-28` — the rest of the family
+
+Source `662e752e`. `role-compile` v1.8 → **v1.47**, `role-info` v1.2 → **v1.7**, `role-validate` v1.1 → **v1.9**, plus the newly vendored `role-edit` described above.
+
+Deltas kept: `.dev.env SUPPORT_GUARD` in `role-compile`; in `role-edit` the validator resolved from `1c-role-validate` with its exit code propagated.
+
+
+### New tool `2026-10-28` — `role-edit` v1.9 vendored
+
+`role-edit` is new to the fork: our `role-compile` only ever creates a role with a new UUID, so changing an existing role was the documented exception "edit `Ext/Rights.xml` by hand against the templates". The upstream tool does that in place — rights, RLS, templates, role flags, synonym and comment — keeping the UUID and every entry the operation does not name.
+
+Local deltas, on top of the upstream script:
+
+- `.dev.env SUPPORT_GUARD` before `.v8-project.json` `editingAllowedCheck`, the same block as the other mutators (a role on vendor support is refused).
+- The auto-validation call resolves the fork's sibling directory (`../../1c-role-validate`) and its **exit code propagates** — a role that was written but fails `role-validate` exits non-zero instead of silently reporting success.
+
+Verification: upstream's 28 `role-edit` cases pass against the vendored script (hybrid skills tree, PowerShell runtime).
 
 ### Local fix `2026-10-14` — `role-validate` parameters, rights-only edits
 
@@ -345,6 +525,17 @@ The PowerShell scripts under `tools/1c-role-{compile,info,validate}/scripts/` we
 - **All 10 validators** (`role-validate`, `meta-validate`, `epf-validate`, `skd-validate`, `cf-validate`, `cfe-validate`, `form-validate`, `mxl-validate`, `subsystem-validate`, `interface-validate`) now emit a single one-liner by default; the full per-check trace is available via `-Detailed`. Each accepts a folder path as the primary file argument and resolves to the canonical XML file (e.g. `Roles/MyRole` → `Roles/MyRole/Ext/Rights.xml`). The universal `-Path` parameter is supported in addition to the legacy named parameters (`-RolePath`, `-FormPath`, `-TemplatePath`, `-ObjectPath`, …).
 
 ## skd-manage.md
+
+### Upstream sync `2026-10-28` — the `skd-*` family
+
+Source `662e752e`. `skd-compile` v1.109 → **v1.139**, `skd-decompile` v0.91 → **v0.106**, `skd-edit` v1.30 → **v1.50**, `skd-info` v1.8 → **v1.14**, `skd-validate` v1.2 → **v1.8** (`skd-info` / `skd-validate` / `skd-decompile` had no local delta — plain refresh).
+
+Deltas kept: `.dev.env SUPPORT_GUARD` before `.v8-project.json` in `skd-compile` / `skd-edit`; processing instructions kept literal in the compact-tag writer of `skd-edit` (upstream protects CDATA and comments only).
+
+What the refresh buys: a lossless `decompile → compile` round-trip for filter and parameter **values** (references, empty values, calculated fields, `availableValues`, parameter data types and their short form), query-dataset flags and source binding, and `ProviderPath` for network paths.
+
+Verification (upstream snapshot harness against the ported files): `skd-compile` **54/54**, `skd-decompile` **19/19**, `skd-edit` **59/59**, `skd-info` **8/8** (3 skipped by fixture prerequisites), `skd-validate` **19/19** (7 skipped).
+
 
 ### Upstream sync `2026-07-30`
 
@@ -401,6 +592,13 @@ The PowerShell scripts under `tools/1c-skd-{compile,edit,info,validate}/scripts/
 
 ## subsystem-manage.md
 
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `subsystem-compile` v1.9 → **v1.35**, `subsystem-edit` v1.7 → **v1.27**, `subsystem-info` v1.2 → **v1.7**, `subsystem-validate` v1.2 → **v1.7**.
+
+Deltas kept: `.dev.env SUPPORT_GUARD`; the sibling validator in `$PSScriptRoot`; processing instructions kept literal. Upstream's anchor-based `ChildObjects` insert — it patches the parent text instead of re-serialising the document, which is what keeps the parent's formatting intact — replaces the fork's `XmlWriter` save.
+
+
 ### Upstream sync `2026-07-30`
 
 Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `subsystem-compile` v1.5 → **v1.9**, `subsystem-edit` v1.2 → **v1.7**, `subsystem-info` v1.0 → **v1.2**, `subsystem-validate` → **v1.2**.
@@ -419,6 +617,11 @@ The PowerShell scripts under `tools/1c-subsystem-manage/scripts/` were refreshed
 
 ## template-manage.md
 
+### Upstream sync `2026-10-28` — `template-remove`
+
+Source `662e752e`. `template-remove` v1.3 → **v1.9** (`add-template` is described above). Upstream absorbed the fork's save pipeline here too; the processing-instruction branch had to be re-added.
+
+
 ### Local fix `2026-09-13` — object XML paths
 
 `add-template.ps1 -ObjectName` accepts absolute and relative object XML paths and places the template beside the resolved object. Name-only configuration lookup and the EPF `ProcessorName` alias remain supported.
@@ -428,6 +631,13 @@ The PowerShell scripts under `tools/1c-subsystem-manage/scripts/` were refreshed
 Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `template-add` v1.5 → **v1.10**, `template-remove` → **v1.3**. `template-add` enforces the vendor support gate — it refuses to add a template to a locked object of a typical configuration ([support-manage.md](support-manage.md)). `template-remove` keeps the local hardening (preflight parse, atomic root-XML write, `-DryRun` / `-Force`).
 
 ## web-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `web-publish` v1.4 → **v1.16**, `web-info` v1.0 → **v1.7**, `web-stop` v1.0 → **v1.4**, `web-unpublish` v1.0 → **v1.4**.
+
+Deltas kept: the `.dev.env` platform chain in `web-publish` (install-directory `PLATFORM_PATH`, `bin\` resolution for `wsap24.dll`); the `-DryRun` / `-Force` gate in `web-unpublish`. Upstream's newer `default.vrd` defaults (`publishExtensionsByDefault`, `httpServices`) are in.
+
 
 ### Local fix `2026-10-01` — extension HTTP services are published
 
@@ -439,3 +649,17 @@ Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikola
 
 - **OData is enabled correctly in `default.vrd`** — via the `<standardOdata enable="true"/>` child element instead of the old `enableStandardOdata` attribute, which the platform ignored. Publications that need the standard OData interface actually get it now.
 - Platform path resolution follows the `db-*` chain (explicit → `.dev.env` → `.v8-project.json` → auto-detect), locally patched to also accept the version install directory shape used by `.dev.env` `PLATFORM_PATH` (resolves `bin\` for `wsap24.dll`).
+
+## support-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `support-edit` v1.0 → **v1.3** — the toggle itself is unchanged; the refresh brings the shared support-state specification and the `Ext/ParentConfigurations.bin` parsing that the other tools' guard rails now use.
+
+## xdto-manage.md
+
+### Upstream sync `2026-10-28`
+
+Source `662e752e`. `xdto-compile` v1.1 → **v1.18**, `xdto-decompile` v1.0 → **v1.3**, `xdto-edit` v1.0 → **v1.9**, `xdto-info` v1.0 → **v1.3**, `xdto-validate` v1.1 → **v1.6**.
+
+Deltas kept: the `.dev.env SUPPORT_GUARD` gate in `xdto-compile` / `xdto-edit`; the sibling `xdto-validate` / `xdto-decompile` dispatch from `$PSScriptRoot` (upstream's `..\..\xdto-<name>\scripts` path does not exist in this layout). Upstream's `Assert-EditAllowed` — resolve the element uuid, walk up to the configuration root, treat an autonomous external object as always editable — replaces the fork's simpler walk.
