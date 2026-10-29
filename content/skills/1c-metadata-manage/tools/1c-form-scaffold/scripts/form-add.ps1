@@ -570,7 +570,14 @@ foreach ($p in $kindPurposes.Keys) {
 	if ($p.ToLowerInvariant() -eq $Purpose.ToLowerInvariant()) { $purposeKey = $p; break }
 }
 if (-not $purposeKey) {
-	Write-Error "Назначение '$Purpose' недопустимо для $objectType. Допустимые: $(($kindPurposes.Keys | Sort-Object) -join ', ')"
+	# Список допустимых считаем до сообщения и защитно: раньше текст ошибки сам падал
+	# («операция индексирования» / пустой набор), и оператор вместо причины видел трейс.
+	$allowedPurposes = if ($kindPurposes) { @($kindPurposes.Keys | Sort-Object) -join ', ' } else { '' }
+	if (-not $allowedPurposes) {
+		Write-Error "Назначение '$Purpose' недопустимо: для типа $objectType назначений формы не задано."
+		exit 1
+	}
+	Write-Error "Назначение '$Purpose' недопустимо для $objectType. Допустимые: $allowedPurposes"
 	exit 1
 }
 $Purpose = $purposeKey

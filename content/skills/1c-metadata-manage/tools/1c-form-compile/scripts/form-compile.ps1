@@ -47,7 +47,10 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	Write-Output -NoEnumerate $parsed
+	# PowerShell 7 оборачивает не-массив в List<object>: у вызывающего .PSObject.Properties
+	# перечисляет Capacity/Count вместо ключей JSON, а индексация даёт «индекс массива равен
+	# null». -NoEnumerate нужен только массиву — одиночный объект возвращаем как есть.
+	if ($parsed -is [System.Array]) { Write-Output -NoEnumerate $parsed } else { return $parsed }
 }
 
 # --- Чтение входного JSON-файла ---
