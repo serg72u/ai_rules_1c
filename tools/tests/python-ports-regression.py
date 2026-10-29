@@ -1511,10 +1511,6 @@ def _(work):
 @case("form-compile events parity: PowerShell resolves and refuses identically",
       needs_powershell=True)
 def _(work):
-    # Known divergence: form-compile.ps1 was re-synced to upstream v1.217 (generated event
-    # catalog, from-object presets, handler stubs) while form-compile.py still carries the
-    # fork's v1.176 semantics. Tracked in docs/runtime-selection.md -> "Known divergence".
-    raise CaseSkipped("form-compile.py lags the PowerShell master (see runtime-selection.md)")
     for tag, (keys, expected) in EVENT_ACCEPTED.items():
         run, out = compile_form(FORM_COMPILE_PS1, work, "ps-" + tag, keys)
         assert_equal(0, run["exit_code"], f"ps {tag}: exit code (stderr: {run['stderr'][-400:]})")
@@ -2121,10 +2117,6 @@ def _(work):
 @case("form-compile defaults parity: PowerShell writes the same defaults and refusals",
       needs_powershell=True)
 def _(work):
-    # Known divergence: form-compile.ps1 was re-synced to upstream v1.217 (generated event
-    # catalog, from-object presets, handler stubs) while form-compile.py still carries the
-    # fork's v1.176 semantics. Tracked in docs/runtime-selection.md -> "Known divergence".
-    raise CaseSkipped("form-compile.py lags the PowerShell master (see runtime-selection.md)")
     assert_from_object_defaults(FORM_COMPILE_PS1, work, "ps")
 
 
@@ -2138,15 +2130,21 @@ def assert_form_add_name_and_record(script, runner, work, label):
 
     register = os.path.join(directory, "InformationRegisters", "TestRegister.xml")
     write_text(register, MINIMAL_REGISTER)
-    run = runner(script, ["-ObjectPath", register, "-FormName", "ObjectForm", "-Purpose", "Object"], directory)
-    assert_equal(0, run["exit_code"], f"{label}: register object form (stderr: {run['stderr'][-400:]})")
-    form = os.path.join(directory, "InformationRegisters", "TestRegister", "Forms", "ObjectForm", "Ext", "Form.xml")
+    # A register has no `Object` purpose at all: the record form is `Record` and it names its main
+    # attribute Запись. `Object` is refused with the allowed list (upstream's purpose table).
+    refused = runner(script, ["-ObjectPath", register, "-FormName", "ObjectForm", "-Purpose", "Object"], directory)
+    assert_equal(1, refused["exit_code"], f"{label}: register -Purpose Object must be refused")
+    assert_true("Record" in (refused["stderr"] + refused["stdout"]),
+                f"{label}: the refusal names the allowed purposes: {(refused['stderr'] + refused['stdout'])[-300:]}")
+    run = runner(script, ["-ObjectPath", register, "-FormName", "RecordForm", "-Purpose", "Record"], directory)
+    assert_equal(0, run["exit_code"], f"{label}: register record form (stderr: {run['stderr'][-400:]})")
+    form = os.path.join(directory, "InformationRegisters", "TestRegister", "Forms", "RecordForm", "Ext", "Form.xml")
     names = [a.get("name") for a in ElementTree.parse(form).getroot().iter()
              if a.tag.rsplit("}", 1)[-1] == "Attribute"]
-    assert_equal([RECORD_NAME], names, f"{label}: register object-form main attribute")
+    assert_equal([RECORD_NAME], names, f"{label}: register record-form main attribute")
 
 
-@case("form-add: a non-identifier -FormName is refused, a register's object form uses Запись")
+@case("form-add: a non-identifier -FormName is refused, a register's record form uses Запись")
 def _(work):
     assert_form_add_name_and_record(FORM_ADD_PY, run_python_tool, work, "py")
 
@@ -2154,12 +2152,7 @@ def _(work):
 @case("form-add names parity: PowerShell refuses the same names and names the attribute Запись",
       needs_powershell=True)
 def _(work):
-    # Known divergence: the ported PowerShell master keeps upstream's purpose table, where an
-    # InformationRegister has no `Object` purpose at all (Custom / List / Record / RecordSet),
-    # while form-add.py still accepts it. Tracked in docs/runtime-selection.md -> "Known
-    # divergence at this commit". The identifier half is covered by the python case above and by
-    # the metadata-tools regression, both of which run the same allowlist in both runtimes.
-    raise CaseSkipped("form-add.py lags the PowerShell purpose table (see runtime-selection.md)")
+    assert_form_add_name_and_record(FORM_ADD_PS1, run_powershell_tool, work, "ps")
 
 
 CLASH_ATTRIBUTE = (
@@ -2206,11 +2199,6 @@ def meta_validate_shapes(work, label):
     inject_child(target, CLASH_ATTRIBUTE)
     shapes.append(("8.", directory, target))
 
-    directory, target = catalog_target(work, f"mv-{label}-12")
-    register = os.path.join(directory, "InformationRegisters", "TestRegister.xml")
-    write_text(register, MINIMAL_REGISTER.replace("<DefaultRecordForm/>", "<Periodicity>Day</Periodicity>"))
-    shapes.append(("12.", directory, register))
-
     directory, target = catalog_target(work, f"mv-{label}-16a")
     inject_child(target, FOLDER_TYPE_ATTRIBUTE)
     shapes.append(("16a.", directory, target))
@@ -2230,6 +2218,14 @@ def _(work):
     for marker, directory, target in meta_validate_shapes(work, "py"):
         run = run_python_tool(META_VALIDATE_PY, ["-ObjectPath", target], directory)
         combined = run["stdout"] + run["stderr"]
+        if marker == "2.":
+            # A missing GeneratedType category is a warning in the PS master (upstream v1.42): the
+            # platform loads such a dump, so the run must succeed and name the finding. Severity
+            # spacing differs between the runtimes, so match the message, not the "[WARN] " prefix.
+            assert_equal(0, run["exit_code"], f"2.: the validator exited non-zero\n{combined[-600:]}")
+            assert_true("2. Missing GeneratedType categories" in combined,
+                        f"no 2. Missing GeneratedType diagnostic\n{combined[-600:]}")
+            continue
         assert_true(run["exit_code"] != 0, f"{marker}: the validator exited 0\n{combined[-600:]}")
         assert_true(f"[ERROR] {marker}" in combined, f"no [ERROR] {marker} diagnostic\n{combined[-600:]}")
 
@@ -2237,12 +2233,11 @@ def _(work):
 @case("meta-validate new checks parity: PowerShell prints the same diagnostics",
       needs_powershell=True)
 def _(work):
-    # Known divergence: the PowerShell side was re-synced to upstream v1.42 (checks up to 24,
-    # relaxed GeneratedType naming, type-set rules) while meta-validate.py still carries the
-    # fork's older base. The form-registration checks both runtimes share (6a/6c/6d) and 16a are
-    # covered by the two cases above. Tracked in docs/runtime-selection.md -> "Known divergence
-    # at this commit"; re-port the Python side from cc-1c-skills `port-claude-code-py`.
-    raise CaseSkipped("meta-validate.py lags the PowerShell master (see runtime-selection.md)")
+    for marker, directory, target in meta_validate_shapes(work, "parity"):
+        py = run_python_tool(META_VALIDATE_PY, ["-ObjectPath", target], directory)
+        ps = run_powershell_tool(META_VALIDATE_PS1, ["-ObjectPath", target], directory)
+        assert_equal(py["exit_code"], ps["exit_code"], f"{marker}: exit codes differ")
+        assert_equal(diagnostics(py), diagnostics(ps), f"{marker}: diagnostics differ")
 
 
 # ---------------------------------------------------------------- shipped command ports

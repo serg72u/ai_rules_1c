@@ -2,6 +2,21 @@
 
 The PowerShell tools under `tools/` are vendored from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (MIT). This file holds the per-document sync notes that used to close each `docs/*.md` (what each upstream sync changed, what was cross-checked and what stays deliberately local). It is maintainer history — nothing loads it during a task; the operational description of every tool lives in the domain doc named by each heading.
 
+## Python ports
+
+### Upstream sync `2026-10-28` — the Python entry points
+
+The upstream commit this sync targets also carries Python peers for almost every tool (77 `.py`), so the four ports we ship were rebuilt the same way as the PowerShell masters — three-way merge against the pinned base, fork deltas re-applied — instead of being left behind:
+
+- `meta-edit.py` — `.dev.env SUPPORT_GUARD` stays ahead of `.v8-project.json`; the validator is resolved as a sibling tree (`1c-meta-validate` / `1c-epf-validate`, `.py` first, `.ps1` as the fallback) and its exit code is propagated instead of being collected and dropped;
+- `form-add.py` — the fork's `.dev.env` gate stays; the register rule now follows upstream's purpose table (`Record` with `Запись`, `Object` refused with the allowed list) instead of the fork's hardcoded `Запись` for any object form;
+- `form-compile.py` — upstream's generated event catalog, from-object presets and handler stubs; fork deltas ported: an event outside the catalog is refused (element and form), a standalone `handlers` map produces its events, and a `handlers` key missing from `on` is refused instead of silently dropped;
+- `meta-validate.py` — the fork's exact `<Type><Category>.<Name>` rule for `GeneratedType` and the forbidden `Periodicity` / `DefaultRecordSetForm` entries for information registers were dropped: the PS master (v1.42) no longer enforces them and dumps the platform loads were being rejected. A missing `GeneratedType` category is a warning in both runtimes now.
+
+Consequence for the PowerShell side, found by the parity run and fixed there: `form-compile.ps1` still carried the `Write-Output -NoEnumerate` idiom, which under PowerShell 7 wraps a non-array in a `List<object>` and made every `-FromObject` run fail with «операция индексирования; индекс массива равен null»; and `form-add.ps1` built its "invalid purpose" message from a table that can be `$null`, so the error path itself threw. Both are fixed.
+
+`tools/tests/python-ports-regression.py` runs with **no skipped cases**: 60/60, parity of diagnostics and exit codes against the PowerShell masters included.
+
 ## bsp-manage.md
 
 ### Upstream sync `2026-07-30`
