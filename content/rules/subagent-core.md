@@ -45,9 +45,11 @@ Subagent-specific: the agent that makes the final edit owns the validator run; f
 - Every assigned item is implemented or explicitly listed as not done. A plan that turns out wrong goes back to the parent as a `CONFUSION`; the subagent does not re-plan.
 - If a criterion or a gate cannot be met, say so in the report — never present a partial result as complete.
 
-### Handoff in / out (implementation subagents)
+### Handoff in / out (every subagent)
 
-When one change is split across several implementation subagents (`1c-metadata-manager`, `1c-developer`, `1c-refactoring`, `1c-performance-optimizer`, `1c-error-fixer` — typical chain: metadata stubs first, BSL bodies next), the upstream subagent puts a fixed-format **Handoff** block at the very top of its final report. The parent's `## Upstream Handoff` copy preserves decisions and the reported artifact snapshot; current file contents remain the source of truth for the next edit. Parent-side forwarding rules — `subagent-pipeline.md → Stage 3 — Handoff between implementation subagents`.
+Every subagent result carries a handoff block. Implementation subagents (`1c-metadata-manager`, `1c-developer`, `1c-refactoring`, `1c-performance-optimizer`, `1c-error-fixer` — typical chain: metadata stubs first, BSL bodies next) forward work to the next implementer; read-only subagents (`1c-explorer`, `1c-code-reviewer`, `1c-arch-reviewer`, `1c-tester`, `1c-analytic`, `1c-planner`, `1c-doc-writer`) report in the compact form below what they actually established, so the parent does not re-discover it. **A result without the block is not an accepted stage:** the parent requests the fix from the same subagent instead of reconstructing the gap itself, and a `completed` mark on a board or plan closes nothing on its own — the parent closes the item against the handoff and the current files.
+
+When one change is split across several implementation subagents, the upstream subagent puts a fixed-format **Handoff** block at the very top of its final report. The parent's `## Upstream Handoff` copy preserves decisions and the reported artifact snapshot; current file contents remain the source of truth for the next edit. Parent-side forwarding rules — `subagent-pipeline.md → Stage 3 — Handoff between implementation subagents`.
 
 **Handoff out** — emit whenever a further implementation subagent is expected (when unsure, emit). Machine-readable: one fact per line, ≤ 120 chars, no prose paragraphs; explanations belong in the report body.
 
@@ -80,6 +82,23 @@ When one change is split across several implementation subagents (`1c-metadata-m
 ### Open questions raised
 - <CONFUSION-id> — <one-line summary> — <status: resolved / pending>
 ```
+
+**Compact form — read-only subagents.** Exploration, review, analysis, planning and test results use the same `## Upstream Handoff` heading with three sections; one fact per line, ≤ 120 chars:
+
+```text
+## Upstream Handoff
+
+### Established (with evidence)
+- <fact> — <file:line | MCP call and result | query> — <confirmed / likely>
+
+### Not established / not checked
+- <question> — <why: no access / out of scope / tool unavailable>
+
+### Impact on the task
+- <what the parent may now decide> — <what still needs a decision or a run>
+```
+
+A read-only handoff is working material, never a verdict: it does not claim a PASS, an applied change or a fixed defect, and it names the checks that were not run. The parent forwards it into the implementation brief and keeps confirmed facts separate from inferences.
 
 **Handoff in** — read `## Upstream Handoff` first; reuse its decisions, inventory and public-contract intent instead of rediscovering them. Before editing, read the current target fragment and the context needed to preserve intervening changes; a fingerprint check or targeted `Read` is normal work, not forbidden re-exploration. Reuse validation only when the current content fingerprint and relevant execution context match the recorded evidence (`verification-gates.md → Gate execution and evidence reuse`). A missing / changed fingerprint makes affected evidence stale: inspect the change and run only missing or invalidated gates. Additional discovery still follows `mcp-first-search.md`; avoid bulk re-reads of unchanged files. If current contents contradict a locked decision or public contract materially, raise `CONFUSION`; never overwrite another agent's edits or silently revise the decision.
 
