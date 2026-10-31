@@ -51,7 +51,7 @@ Both these parameters and the practices they govern — adding a project prefix 
 
 ### Infobase / deployment parameters
 
-Used by `/loadfrom1cbase`, `/update1cbase`, `/getconfigfiles`, `/deploy-and-test`, the full-cycle commands (`/initproject`, `/restore-testbase`, `/test-fix-loop`, `/build-release`) and the `1c-tester` subagent. **Not consulted at all for pure code, review, analysis, or documentation tasks** — pure code work proceeds even when this entire block is empty.
+Used by `/loadfrom1cbase`, `/update1cbase`, `/getconfigfiles`, `/deploy-and-test`, the full-cycle commands (`/initproject`, `/restore-testbase`, `/test-fix-loop`, `/build-release`) and the `1c-tester` subagent. **Not consulted at all for pure code, review, analysis, or documentation tasks** — pure code work proceeds even when this entire block is empty. Configuration builds themselves run only on a direct user instruction — by default the user performs the build in EDT (`USER-RULES.md → Standing rules`); these parameters configure the procedures, they do not authorize the agent to start a build.
 
 | Parameter | Effect | Class | Behavior when empty |
 |---|---|---|---|

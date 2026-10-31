@@ -84,6 +84,7 @@ What changes:
 
 ## DB update, launches, external objects
 
+- **Configuration builds run only on a direct user instruction.** By default the user performs the build in EDT themselves (`USER-RULES.md → Standing rules`); never start `build_external_objects`, a batch / distribution build or any equivalent build step on your own initiative — finish the source work and propose the build as a manual step. The standing no-agent-DB-update rule covers apply; this bullet extends the same default to builds.
 - **`update_database`** applies configuration changes to an infobase from EDT (full or incremental, targeted by launch configuration or project + application). It is a **destructive** operation in EDT-MCP's own classification and requires consent.
 - The infobase hard gate (`AGENTS.md → Skills and Subagents`) is unchanged in intent: **one owner per deployment**. Either the EDT path (`update_database`, launch configurations, `create_infobase` / `set_infobase_credentials`) or the platform path (`/update1cbase`, `/deploy-and-test`, `db-ops`) — never both against the same infobase in one flow, and never an ad-hoc `1cv8.exe` line. State which path ran in the mandatory `IB tooling:` line.
 - The slash commands remain valid for an EDT project **when the tree they load from is a Designer XML dump** (repo-stored dump, or a fresh `export_configuration_to_xml`). They cannot load `src/` MDO directly.
