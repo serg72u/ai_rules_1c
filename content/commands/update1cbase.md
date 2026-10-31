@@ -195,8 +195,17 @@ Loads the **effective snapshot**: main configuration + every extension from `EXT
 - `EXTENSION_NAMES` is a load sequence, not runtime-order evidence or authorization to delete unlisted installed extensions. Preserve/identify relevant extras and report any runtime mismatch. Save each pass's log/result evidence before the next pass reuses those paths.
 - The **Update retry loop** applies to every pass with its own 3-attempt budget. A pass that exhausts its budget stops the mode; report which passes completed and which failed.
 
+## Step 3c. Refresh the search contour (after a successful apply)
+
+A successful apply changes the configuration behind the metadata MCP indexes. Until they are rebuilt, metadata and code search answers come from the previous generation — they are stale evidence, not facts about the current infobase.
+
+1. Choose the lightest sufficient path from the `1c-mcp-reindex` skill for what actually changed: the code metadata server (port 8000) polls the export and usually catches up on its own, while a terminal vector store needs the documented reset. For the graph server (port 8006) a container restart does **not** reingest a changed source — full regeneration is the only reliable path.
+2. Confirm by what the servers report, never by the update succeeding: `/ready` returns 200 (503 while indexing) and the logs show a new generation start; for the graph, the parsed source appears and `metadata_ingest` runs for a real duration, not `0.0s`.
+3. Until that confirmation the search contour is **stale**: do not cite metadata/code search as evidence for a decision, and never state "the index is refreshed" because the load succeeded.
+4. An unavailable server, an unsupported schema or an unbound graph project does not cancel or revert the DB update: it leaves the search contour stale, and that state is reported with the reason.
+
 ## Step 4. Final report
 
 If the task also requests refreshing the source directory after the update, first complete all required apply stages, then follow `/loadfrom1cbase` with the same targets and appropriate scopes. Do not overwrite local changes or perform an unconditional full return dump. Without a requested refresh, no extra dump is required; report any baseline not maintained by the selected load tool before the next incremental export.
 
-Briefly report the infobase, main configuration / extension, source directory, load scope (full / selected files / Git diff), tool, checks, apply result and any directory refresh separately. Include retry attempts, fixes and dynamic update / restructuring from the log. In full-snapshot mode, list every pass. A successful load with failed apply, or successful apply with failed return export, remains a partially completed workflow; list errors explicitly.
+Briefly report the infobase, main configuration / extension, source directory, load scope (full / selected files / Git diff), tool, checks, apply result and any directory refresh separately. Include retry attempts, fixes and dynamic update / restructuring from the log. State the search-contour result separately from the apply result: `refreshed` (with the confirmation it rests on), `stale` or `not refreshed — <reason>`; a successful apply never implies a refreshed index. In full-snapshot mode, list every pass. A successful load with failed apply, or successful apply with failed return export, remains a partially completed workflow; list errors explicitly.
