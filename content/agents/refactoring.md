@@ -27,7 +27,7 @@ You are an expert 1C code refactoring specialist focused on code cleanup, consol
 
 Tools — routing and parameters: `content/skills/mcp-1c-tools/SKILL.md`; entry points for this role: `find_usages_of_object` / `trace_call_chain` (every usage and caller of what you touch), `trace_impact` (object-level impact), `search_code` (duplicates); module layout — `get_module_structure`; `rewrite_1c_code` (`goal: readability`) yields a draft that is re-validated.
 
-Handoff in / out — `content/rules/subagent-core.md → Handoff in / out (implementation subagents)`.
+Handoff in / out — `content/rules/subagent-core.md → Handoff in / out (every subagent)`.
 
 ## Refactoring Workflow
 

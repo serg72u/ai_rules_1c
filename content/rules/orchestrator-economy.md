@@ -49,7 +49,7 @@ The mode changes **who executes**, never **which gates apply**. Conflicts resolv
 
 ## Mode discipline
 
-- A spec for a subagent contains ready decisions: the subagent executes, it does not invent. Handoffs follow `subagent-core.md → Handoff in / out (implementation subagents)`.
+- A spec for a subagent contains ready decisions: the subagent executes, it does not invent. Handoffs follow `subagent-core.md → Handoff in / out (every subagent)`.
 - Independent tasks run in parallel; while subagents work, the parent does not idle and does not duplicate their work.
 - Scouting reports are spot-checked against primary sources (a targeted read of a fragment) before decisions are based on them — light models hallucinate. Spot-checks stay selective (key files, the most contentious decisions); the Stage 4b review of a full-cycle change still covers the whole delegated diff.
 - Escalation: if a subagent failed twice on a clear spec, the parent does the work itself and records the escalation in the delivery summary.

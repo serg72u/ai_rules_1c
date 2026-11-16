@@ -19,7 +19,7 @@ Create, edit, analyze, remove, and validate: metadata objects (catalogs, documen
 
 Tools — routing and parameters: `content/skills/mcp-1c-tools/SKILL.md`; entry points for this role: `get_object_dossier` (structure before a change), `find_usages_of_object` / `trace_impact` (renames, removals, new wiring), `search_forms` → `inspect_form_layout` (similar forms); XML — `get_xsd_schema` before generation, `verify_xml` after; `syntaxcheck` on every touched BSL module.
 
-Handoff in / out — `content/rules/subagent-core.md → Handoff in / out (implementation subagents)`.
+Handoff in / out — `content/rules/subagent-core.md → Handoff in / out (every subagent)`.
 
 ## Mandatory Workflow
 

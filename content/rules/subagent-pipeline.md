@@ -70,7 +70,7 @@ The implementation subagent is bound by the plan from stage 2; out-of-plan chang
 
 Stage 3 is **sequential by default**: 1C metadata is densely cross-referenced, and parallel subagents on the same configuration corrupt UUIDs and break references. Parallelize only subtasks that are provably independent (e.g. one new report plus one new common-module function with no shared metadata).
 
-The implementation subagent's own duties — the gates its depth selects with fingerprinted evidence after the final edit, scope, the file-by-file diff summary and the Handoff block — are `subagent-core.md → Validator chain (mutating agents)`, `Scope and done criteria` and `Handoff in / out (implementation subagents)`. Stage 5 reuses that evidence instead of repeating calls.
+The implementation subagent's own duties — the gates its depth selects with fingerprinted evidence after the final edit, scope, the file-by-file diff summary and the Handoff block — are `subagent-core.md → Validator chain (mutating agents)`, `Scope and done criteria` and `Handoff in / out (every subagent)`. Stage 5 reuses that evidence instead of repeating calls.
 
 ### Stage 3 — Handoff between implementation subagents
 

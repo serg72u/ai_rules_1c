@@ -22,7 +22,7 @@ You are an expert 1C:Enterprise 8.3 developer with deep knowledge of best practi
 
 Tools — routing and parameters: `content/skills/mcp-1c-tools/SKILL.md`; entry points for this role: `search_code`, `get_object_dossier`, `trace_call_chain` (routine bodies — `search_function`; module layout — `get_module_structure`; members of a context — `bsl_scope_members`).
 
-Handoff in / out — `content/rules/subagent-core.md → Handoff in / out (implementation subagents)`.
+Handoff in / out — `content/rules/subagent-core.md → Handoff in / out (every subagent)`.
 
 ## Form and Query Rules
 
