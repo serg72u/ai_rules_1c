@@ -1,11 +1,18 @@
-﻿# form-compile v1.217 — Compile 1C managed form from JSON or object metadata
+﻿# form-compile v1.224 — Compile 1C managed form from JSON or object metadata
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 # Local: from-object — a document choice form gets ChoiceMode like the catalog
 # one, the document item preset writes AutoTime=CurrentOrLast /
 # UsePostingMode=Auto / RepostOnWrite=true, and `Description` is bound only when
-# DescriptionLength > 0. windowOpeningMode / autoTime / usePostingMode accept only
-# the platform enum values, and a missing Configuration.xml is reported instead of
-# silently assuming 2.17. Same deltas as form-compile.py.
+# DescriptionLength > 0. A missing Configuration.xml is reported instead of
+# silently assuming 2.17. Events: one normalizer for the three DSL spellings
+# (events / on + handlers / handlers alone) with a refusal on two spellings at
+# once, on a `handlers` key absent from `on` and on an event name the platform
+# does not have at all (not in the event catalog of any element). Support guard
+# from .dev.env SUPPORT_GUARD, fail-closed; the guard inspects Ext/Form.xml of a
+# -FromObject directory. Same deltas as form-compile.py.
+# Local (2026-11-08): `input` key autoEditMode → <AutoEditMode> (format 2.21,
+# boolean only, before Width per XSD) — shared with form-edit's emitter copy;
+# not in form-compile.py yet.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[string]$JsonPath,
@@ -27,14 +34,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -47,10 +63,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	# PowerShell 7 оборачивает не-массив в List<object>: у вызывающего .PSObject.Properties
-	# перечисляет Capacity/Count вместо ключей JSON, а индексация даёт «индекс массива равен
-	# null». -NoEnumerate нужен только массиву — одиночный объект возвращаем как есть.
-	if ($parsed -is [System.Array]) { Write-Output -NoEnumerate $parsed } else { return $parsed }
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -698,7 +711,7 @@ function Generate-CatalogItemDSL($meta, [hashtable]$p, [hashtable]$fd) {
 	# BSP group
 	$bspGroup = if ($p.additional -and $null -ne $p.additional.bspGroup) { $p.additional.bspGroup } else { $true }
 	if ($bspGroup) {
-		$rootElements += [ordered]@{ group = "vertical"; name = "ГруппаДополнительныеРеквизиты" }
+		$rootElements += [ordered]@{ group = "vertical"; name = "ГруппаДополнительныеРеквизиты"; showTitle = $true }
 	}
 
 	# Properties
@@ -930,7 +943,7 @@ function Generate-DocumentItemDSL($meta, [hashtable]$p, [hashtable]$fd) {
 			$addPageChildren += @($addLeftEls + $addRightEls)
 		}
 		if ($addBspGroup) {
-			$addPageChildren += [ordered]@{ group = "vertical"; name = "ГруппаДополнительныеРеквизиты" }
+			$addPageChildren += [ordered]@{ group = "vertical"; name = "ГруппаДополнительныеРеквизиты"; showTitle = $true }
 		}
 		$additionalPage = [ordered]@{ page = "ГруппаДополнительно"; title = "Дополнительно"; children = $addPageChildren }
 	}
@@ -961,7 +974,7 @@ function Generate-DocumentItemDSL($meta, [hashtable]$p, [hashtable]$fd) {
 		$rootElements += $headerGroup
 		if ($footerElements.Count -gt 0) { $rootElements += $footerElements }
 		if ($addBspGroup -and $addPos -ne "none") {
-			$rootElements += [ordered]@{ group = "vertical"; name = "ГруппаДополнительныеРеквизиты" }
+			$rootElements += [ordered]@{ group = "vertical"; name = "ГруппаДополнительныеРеквизиты"; showTitle = $true }
 		}
 	} else {
 		# Pages form
@@ -1318,7 +1331,7 @@ function Generate-ChartOfAccountsItemDSL($meta, [hashtable]$p, [hashtable]$fd, [
 			$flagChildren += [ordered]@{ check = $flag.Name; path = "Объект.$($flag.Name)" }
 		}
 		$elements += [ordered]@{
-			group = "vertical"; name = "ГруппаПризнакиУчета"; title = "Признаки учета"
+			group = "vertical"; name = "ГруппаПризнакиУчета"; showTitle = $true; title = "Признаки учета"
 			children = $flagChildren
 		}
 	}
@@ -1619,6 +1632,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -1847,7 +1862,7 @@ if ($FromObject) {
 
 	# Feed DSL into existing compiler
 	$dslJson = $dsl | ConvertTo-Json -Depth 20
-	$def = $dslJson | ConvertFrom-Json
+	$def = ConvertFrom-JsonInput $dslJson 'generated DSL'
 } else {
 	# --- 1. Load and validate JSON (original mode) ---
 
@@ -2043,7 +2058,7 @@ function Parse-FilterShorthand {
 			if ($valPart -eq "true" -or $valPart -eq "false") { $result.value = [bool]($valPart -eq "true"); $result["valueType"] = "xs:boolean" }
 			elseif ($valPart -match '^\d{4}-\d{2}-\d{2}T') { $result.value = $valPart }  # дата без valueType → Emit-FilterItem выведет StandardBeginningDate Custom (дефолт даты в фильтре)
 			elseif ($valPart -match '^\d+(\.\d+)?$') { $result.value = $valPart; $result["valueType"] = "xs:decimal" }
-			elseif ($valPart -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета)\.') { $result.value = $valPart; $result["valueType"] = "dcscor:DesignTimeValue" }
+			elseif ($valPart -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|ПланОбмена|Enum|Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|ExchangePlan)\.[^.]+\.[^.]+') { $result.value = $valPart; $result["valueType"] = "dcscor:DesignTimeValue" }
 			else { $result.value = $valPart; $result["valueType"] = "xs:string" }
 		}
 	} else { $result.field = $s }
@@ -2121,7 +2136,7 @@ function Emit-FilterItem {
 					elseif ("$v" -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена|Catalog|Enum|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { $vt = 'dcscor:DesignTimeValue' }
 					else { $vt = 'xs:string' }
 				}
-				$vStr = if ($v -is [bool]) { "$v".ToLower() } else { Esc-XmlText "$v" }
+				$vStr = if ($v -is [bool]) { "$v".ToLower() } elseif ($vt -eq 'dcscor:DesignTimeValue') { Esc-XmlText (Normalize-DesignTimeValue "$v") } else { Esc-XmlText "$v" }
 				$nsAttr = Get-ValueTypeNsAttr -valueType $vt -value "$v"
 				X "$indent`t<dcsset:right$nsAttr xsi:type=`"$vt`">$vStr</dcsset:right>"
 			}
@@ -2166,7 +2181,7 @@ function Emit-FilterItem {
 			elseif ("$v" -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена|Catalog|Enum|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { $vt = "dcscor:DesignTimeValue" }
 			else { $vt = "xs:string" }
 		}
-		$vStr = if ($item.value -is [bool]) { "$($item.value)".ToLower() } else { Esc-XmlText "$($item.value)" }
+		$vStr = if ($item.value -is [bool]) { "$($item.value)".ToLower() } elseif ($vt -eq 'dcscor:DesignTimeValue') { Esc-XmlText (Normalize-DesignTimeValue "$($item.value)") } else { Esc-XmlText "$($item.value)" }
 		$nsAttr = Get-ValueTypeNsAttr -valueType $vt -value "$($item.value)"
 		X "$indent`t<dcsset:right$nsAttr xsi:type=`"$vt`">$vStr</dcsset:right>"
 	}
@@ -3071,8 +3086,8 @@ function Get-ElementName {
 
 # Собрать упорядоченный список событий элемента (имя, обработчик) из DSL.
 #
-# Один нормализатор на все три формы записи — и эмиттер, и Test-ElementEvent
-# смотрят ровно на его результат, поэтому «событие подключено» и «событие попало
+# Один нормализатор на все три формы записи — эмиттер и проверка по каталогу
+# (Test-EventPairs) смотрят ровно на его результат, поэтому «событие подключено» и «событие попало
 # в XML» не могут разойтись:
 #
 #   * канонический     $el.events   = { Событие: ИмяОбработчика|null }
@@ -3109,18 +3124,7 @@ function Get-EventPairs {
 		if ($hasHandlers) { $legacy += 'handlers' }
 		Deny-EventConflict $elementName "одновременно заданы канонический ключ 'events' и legacy-ключ(и) '$($legacy -join "' и '")'." "Оставьте один формат: либо 'events': {Событие: ИмяОбработчика}, либо 'on' + 'handlers'."
 	}
-	# Local: ключ в 'handlers', которого нет в 'on', — опечатка: обработчик не попал бы в форму,
-	# а ошибки бы не было. Апстрим такой ключ молча игнорирует.
-	if ($hasOn -and $hasHandlers) {
-		$onNames = @($el.on | ForEach-Object { if ($_ -is [System.Management.Automation.PSCustomObject]) { "$($_.event)" } else { "$_" } })
-		$orphans = @($el.handlers.PSObject.Properties | Where-Object { $onNames -notcontains "$($_.Name)" } | ForEach-Object { "$($_.Name)" })
-		if ($orphans.Count -gt 0) {
-			Deny-EventConflict $elementName "'handlers' переопределяет события, которых нет в 'on': $($orphans -join ', ')." "Добавьте их в 'on' или уберите из 'handlers'."
-		}
-	}
 
-	# Нормализованный источник: упорядоченный список пар (событие, заданное имя|null).
-	$source = New-Object System.Collections.ArrayList
 	if ($hasEvents) {
 		foreach ($p in $el.events.PSObject.Properties) {
 			# Значение — имя обработчика; null — имя по шаблону; объект { handler, callType } или массив
@@ -3133,34 +3137,39 @@ function Get-EventPairs {
 				[void]$pairs.Add([pscustomobject]@{ name = $p.Name; handler = $h; callType = $ct })
 			}
 		}
-	} elseif ($el.on) {
+	} elseif ($hasOn) {
+		$onNames = @(foreach ($evt in $el.on) { if ($evt -is [System.Management.Automation.PSCustomObject]) { "$($evt.event)" } else { "$evt" } })
+		if ($hasHandlers) {
+			$unknown = @($el.handlers.PSObject.Properties | Where-Object { $onNames -notcontains "$($_.Name)" } | ForEach-Object { "$($_.Name)" })
+			if ($unknown.Count -gt 0) {
+				Deny-EventConflict $elementName "'handlers' переопределяет события, которых нет в 'on': $($unknown -join ', ')." "Добавьте их в 'on' или уберите из 'handlers' — молча отбросить их нельзя, это и есть опечатка, из-за которой обработчик не попадает в форму."
+			}
+		}
 		foreach ($evt in $el.on) {
 			if ($evt -is [System.Management.Automation.PSCustomObject]) {
 				$evtName = "$($evt.event)"; $h = "$($evt.handler)"; $ct = Normalize-CallType "$($evt.callType)" $elementName $evtName
 			} else {
 				$evtName = "$evt"; $h = ""; $ct = ""
 			}
-			if (-not $h) { $h = if ($el.handlers -and $el.handlers.$evtName) { "$($el.handlers.$evtName)" } else { Get-HandlerName -elementName $elementName -eventName $evtName -xmlTag $xmlTag -callType $ct } }
+			if (-not $h) { $h = if ($hasHandlers -and $el.handlers.$evtName) { "$($el.handlers.$evtName)" } else { Get-HandlerName -elementName $elementName -eventName $evtName -xmlTag $xmlTag -callType $ct } }
 			[void]$pairs.Add([pscustomobject]@{ name = $evtName; handler = $h; callType = $ct })
 		}
 	} elseif ($hasHandlers) {
-		# Local: одиночная карта handlers без events/on — то же, что events: имя ключа это событие,
-		# значение — имя обработчика. Апстрим такую форму игнорирует, и обработчик молча пропадал.
+		# Legacy-одиночный handlers: тот же смысл, что events.
 		foreach ($p in $el.handlers.PSObject.Properties) {
-			$evtName = "$($p.Name)"
 			$h = "$($p.Value)"
-			$ct = ''
-			[void]$pairs.Add([pscustomobject]@{ name = $evtName; handler = $h; callType = $ct })
+			if ([string]::IsNullOrEmpty($h)) { $h = Get-HandlerName -elementName $elementName -eventName $p.Name -xmlTag $xmlTag }
+			[void]$pairs.Add([pscustomobject]@{ name = "$($p.Name)"; handler = $h; callType = '' })
 		}
-	}
-
-	foreach ($item in $source) {
-		$h = "$($item.value)"
-		if ([string]::IsNullOrEmpty($h)) { $h = Get-HandlerName -elementName $elementName -eventName $item.name }
-		[void]$pairs.Add([pscustomobject]@{ name = $item.name; handler = $h })
 	}
 	return $pairs
 }
+
+# Local: every event name of the catalog, whatever the element. An event outside it is
+# not a platform event at all (OnEndEdit for OnEditEnd, the obsolete Drop) and is refused
+# before Form.xml is written; an event of another element only gets upstream's [WARN].
+$script:allCatalogEvents = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+foreach ($__tag in $script:eventCatalog.Keys) { foreach ($__ev in $script:eventCatalog[$__tag].Keys) { [void]$script:allCatalogEvents.Add($__ev) } }
 
 # Вид вызова обработчика в расширении: Before / After / Override (регистр не важен); пусто — не указан.
 function Normalize-CallType([string]$raw, [string]$elementName, [string]$eventName) {
@@ -3179,19 +3188,22 @@ function Test-EventPairs {
 	$evs = $script:eventCatalog[$xmlTag]
 	foreach ($pr in $pairs) {
 		$ev = "$($pr.name)"
+		if (-not $script:allCatalogEvents.Contains($ev)) {
+			$known = if ($evs) { [string[]]@($evs.Keys) } else { [string[]]@() }
+			[Array]::Sort($known, [StringComparer]::Ordinal)
+			$knownText = if ($known.Count -gt 0) { $known -join ', ' } else { 'none' }
+			[Console]::Error.WriteLine("[ERROR] Неизвестное событие '$ev' для $what — такого события нет у элементов формы платформы. Известные: $knownText")
+			exit 1
+		}
 		if (-not $evs) {
 			Write-Host "[WARN] $what has no events in standard configurations — the platform may drop '$ev' on load"
 			continue
 		}
 		$entry = Get-EventEntry $xmlTag $ev
 		if (-not $entry) {
-			# Local: опечатка в имени события — отказ, а не предупреждение. Апстрим пишет [WARN] и всё
-			# равно собирает форму, и обработчик молча оказывается у несуществующего события: видно
-			# только когда Конфигуратор откроет форму. Каталог собран по 28.5 тыс. форм типовых,
-			# поэтому «нет в каталоге» — это опечатка либо событие, которого у элемента не бывает.
 			$known = [string[]]@($evs.Keys); [Array]::Sort($known, [StringComparer]::Ordinal)
-			[Console]::Error.WriteLine("[ERROR] Unknown event '$ev' for $what. Known: $($known -join ', ')")
-			exit 1
+			Write-Host "[WARN] Unknown event '$ev' for $what — the platform may drop it on load. Known: $($known -join ', ')"
+			continue
 		}
 		$since = "$($entry[3])"
 		if ($since -and (Get-FormatRank $script:formatVersion) -lt $script:platformFormatRank[$since]) {
@@ -4593,7 +4605,7 @@ $script:childTagOrder = @{
 	'GanttChartField' = 'DataPath DefaultItem TitleLocation Width Height HorizontalStretch VerticalStretch ContextMenu ExtendedTooltip Table Events'
 	'GraphicalSchemaField' = 'DataPath DefaultItem ReadOnly Title TitleLocation WarningOnEditRepresentation Width Height Edit ContextMenu ExtendedTooltip Events'
 	'HTMLDocumentField' = 'DataPath DefaultItem Enabled ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation ToolTipRepresentation Visible WarningOnEditRepresentation Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch Output BorderColor ContextMenu ExtendedTooltip Events'
-	'InputField' = 'DataPath Visible UserVisible DefaultItem Enabled ReadOnly SkipOnInput Title TitleBackColor TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation WarningOnEditRepresentation WarningOnEdit Shortcut HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign EditMode CellHyperlink FixingInTable AutoCellHeight ShowInHeader HeaderHorizontalAlign HeaderPicture ShowInFooter FooterDataPath FooterText FooterTextColor FooterFont FooterHorizontalAlign FooterPicture Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch AllowInputEmptyMultipleValues MultipleValuesFont MultipleValuesTextColor MultipleValuesBackColor VerticalStretch Wrap MarkNegatives PasswordMode MultiLine ExtendedEdit DropListButton ChoiceButton ChoiceButtonRepresentation ClearButton SpinButton OpenButton CreateButton Mask ListChoiceMode ExtendedEditMultipleValues AutoChoiceIncomplete Format MultipleValuePictureShape QuickChoice ChoiceFoldersAndItems EditFormat AutoMarkIncomplete ChooseType AutoShowOpenButtonMode IncompleteChoiceMode ShowCheckBoxesInDropList MultipleValueDataPath MultipleValuePictureDataPath MultipleValuePresentDataPath SpellCheckingOnTextInput TypeDomainEnabled TextEdit AvailableTypes ChoiceForm ChoiceParameterLinks ChoiceParameters EditTextUpdate MinValue ChoiceButtonPicture MaxValue ChoiceList AutoCorrectionOnTextInput AutoShowClearButtonMode ChoiceListButton ChoiceListHeight DropListWidth TextColor BackColor BorderColor Font HeightControlVariant SpecialTextInputMode InputHint ChoiceHistoryOnInput TypeLink ContextMenu ExtendedTooltip Events'
+	'InputField' = 'DataPath Visible UserVisible DefaultItem Enabled ReadOnly SkipOnInput Title TitleBackColor TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation WarningOnEditRepresentation WarningOnEdit Shortcut HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign EditMode CellHyperlink FixingInTable AutoCellHeight ShowInHeader HeaderHorizontalAlign HeaderPicture ShowInFooter FooterDataPath FooterText FooterTextColor FooterFont FooterHorizontalAlign FooterPicture AutoEditMode Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch AllowInputEmptyMultipleValues MultipleValuesFont MultipleValuesTextColor MultipleValuesBackColor VerticalStretch Wrap MarkNegatives PasswordMode MultiLine ExtendedEdit DropListButton ChoiceButton ChoiceButtonRepresentation ClearButton SpinButton OpenButton CreateButton Mask ListChoiceMode ExtendedEditMultipleValues AutoChoiceIncomplete Format MultipleValuePictureShape QuickChoice ChoiceFoldersAndItems EditFormat AutoMarkIncomplete ChooseType AutoShowOpenButtonMode IncompleteChoiceMode ShowCheckBoxesInDropList MultipleValueDataPath MultipleValuePictureDataPath MultipleValuePresentDataPath SpellCheckingOnTextInput TypeDomainEnabled TextEdit AvailableTypes ChoiceForm ChoiceParameterLinks ChoiceParameters EditTextUpdate MinValue ChoiceButtonPicture MaxValue ChoiceList AutoCorrectionOnTextInput AutoShowClearButtonMode ChoiceListButton ChoiceListHeight DropListWidth TextColor BackColor BorderColor Font HeightControlVariant SpecialTextInputMode InputHint ChoiceHistoryOnInput TypeLink ContextMenu ExtendedTooltip Events'
 	'LabelDecoration' = 'UserVisible Visible Enabled Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch SkipOnInput TextColor Font Shortcut Title ToolTip ToolTipRepresentation GroupHorizontalAlign GroupVerticalAlign Hyperlink HorizontalAlign VerticalAlign BackColor BorderColor Border TitleHeight ContextMenu ExtendedTooltip Events'
 	'LabelField' = 'DataPath Visible Enabled UserVisible DefaultItem ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign WarningOnEditRepresentation WarningOnEdit EditMode FixingInTable CellHyperlink AutoCellHeight FooterText ShowInHeader HeaderHorizontalAlign FooterDataPath HeaderPicture ShowInFooter FooterHorizontalAlign Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch MarkNegatives VerticalStretch Format Border BorderColor Hiperlink PasswordMode TextColor BackColor Font ContextMenu ExtendedTooltip Events'
 	'Page' = 'Visible Enabled ReadOnly EnableContentChange UserVisible Title GroupVerticalAlign Shortcut TitleTextColor TitleFont ToolTip ToolTipRepresentation Width Height HorizontalStretch VerticalStretch ChildrenAlign Picture Format Group ChildItemsWidth HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign ShowTitle BackColor TitleDataPath ScrollOnCompress ExtendedTooltip ChildItems'
@@ -4832,6 +4844,8 @@ function Emit-Element {
 		# InputField choice-скаляры
 		"choiceListButton"=1;"quickChoice"=1;"autoChoiceIncomplete"=1
 		"choiceForm"=1;"choiceHistoryOnInput"=1;"footerDataPath"=1;"minValue"=1;"maxValue"=1
+		# InputField — авто-режим редактирования (local, формат 2.21)
+		"autoEditMode"=1
 		# Button — пометка toggle-кнопки (ключ 'checked', не 'check' — во избежание конфликта с типом)
 		"checked"=1
 	}
@@ -5647,8 +5661,14 @@ function Emit-Group {
 	if ($el.currentRowUse) { X "$inner<CurrentRowUse>$($el.currentRowUse)</CurrentRowUse>" }
 
 	# ShowTitle
-	# ShowTitle=true — умолчание платформы (в корпусе только false): пишем лишь false
-	if ($null -ne $el.showTitle -and -not $el.showTitle) { X "$inner<ShowTitle>false</ShowTitle>" }
+	# Обычная группа без showTitle: заголовок показан, если он задан (title или titleDataPath), иначе скрыт — служебная группа
+	# раскладки без заголовка давала бы пустую строку-заголовок (умолчание платформы — показан).
+	# У сворачиваемой/всплывающей заголовок — переключатель: умолчание платформы, пишется лишь явный false.
+	if (@('collapsible','popup') -contains $behaviorVal) {
+		if ($null -ne $el.showTitle -and -not $el.showTitle) { X "$inner<ShowTitle>false</ShowTitle>" }
+	} elseif ($null -ne $el.showTitle) {
+		if (-not ($el.showTitle -eq $true)) { X "$inner<ShowTitle>false</ShowTitle>" }
+	} elseif (-not $el.title -and -not $el.titleDataPath) { X "$inner<ShowTitle>false</ShowTitle>" }
 	# Заголовок свёрнутого представления (collapsible/popup) — мультиязычный текст
 	if ($el.collapsedTitle) { Emit-MLText -tag "CollapsedRepresentationTitle" -text $el.collapsedTitle -indent $inner }
 
@@ -5754,6 +5774,13 @@ function Emit-Input {
 	if ($null -ne $el.choiceListButton) { X "$inner<ChoiceListButton>$(if ($el.choiceListButton){'true'}else{'false'})</ChoiceListButton>" }
 	if ($null -ne $el.markIncomplete) { X "$inner<AutoMarkIncomplete>$(if ($el.markIncomplete){'true'}else{'false'})</AutoMarkIncomplete>" }
 	if ($el.editMode) { X "$inner<EditMode>$($el.editMode)</EditMode>" }
+	# Local: AutoEditMode — свойство поля формата 2.21 (8.5), xs:boolean без умолчания: пишется заданное
+	# значение. Место по XSD — конец свойств поля, перед Width (держит childTagOrder).
+	if ($null -ne $el.autoEditMode) {
+		if (-not ($el.autoEditMode -is [bool])) { [Console]::Error.WriteLine("[ERROR] Element '$name': autoEditMode — true или false, получено '$($el.autoEditMode)'"); exit 1 }
+		if ((Get-FormatRank $script:formatVersion) -lt 221) { [Console]::Error.WriteLine("[ERROR] Element '$name': autoEditMode (<AutoEditMode>) есть только в формате 2.21 (8.5), у формы — $($script:formatVersion)"); exit 1 }
+		X "$inner<AutoEditMode>$(if ($el.autoEditMode){'true'}else{'false'})</AutoEditMode>"
+	}
 	Emit-ColumnPics -el $el -indent $inner
 	if ($el.textEdit -eq $false) { X "$inner<TextEdit>false</TextEdit>" }
 	# InputField-специфичные скаляры (захват «как есть»: платформа эмитит явное не-дефолтное значение)
@@ -5883,6 +5910,25 @@ $script:refRootSynonyms = @{
 	"КритерийОтбора"          = "FilterCriterion"
 }
 $script:enumValueSynonyms = @("EnumValue","ЗначениеПеречисления")
+
+# Значение ссылки в dcscor:DesignTimeValue (отборы, параметры) — к виду Конфигуратора:
+# "Enum.X.EnumValue.Y" / "Enum.X.Y" → "Перечисление.X.Y", "Catalog.X.EmptyRef" → "Справочник.X.ПустаяСсылка".
+# Вид с сегментом EnumValue платформа не разрешает: сравнение с ним всегда ложно (замер 8.3.24).
+$script:designTimeRefRoots = @{
+	"Enum" = "Перечисление"; "Catalog" = "Справочник"; "Document" = "Документ"; "ChartOfAccounts" = "ПланСчетов"
+	"ChartOfCharacteristicTypes" = "ПланВидовХарактеристик"; "ChartOfCalculationTypes" = "ПланВидовРасчета"
+	"ExchangePlan" = "ПланОбмена"; "BusinessProcess" = "БизнесПроцесс"; "Task" = "Задача"
+}
+function Normalize-DesignTimeValue([string]$v) {
+	$parts = @($v -split '\.')
+	if ($parts.Count -lt 3) { return $v }
+	if ($script:designTimeRefRoots.ContainsKey($parts[0])) { $parts[0] = $script:designTimeRefRoots[$parts[0]] }
+	if ($parts[0] -ceq 'Перечисление' -and $parts.Count -ge 4 -and $script:enumValueSynonyms -contains $parts[2]) {
+		$parts = @($parts[0], $parts[1]) + $parts[3..($parts.Count - 1)]
+	}
+	if ($parts[-1] -ceq 'EmptyRef') { $parts[-1] = 'ПустаяСсылка' }
+	return ($parts -join '.')
+}
 
 # Нормализация типа таблицы динсписка: "Справочник.Контрагенты" → "Catalog.Контрагенты".
 # Прощающий ввод: принимаем рус-имя метаданных, переводим в платформенное. Уже англ — без изменений.
@@ -7131,11 +7177,11 @@ function Emit-DLValue {
 	elseif ($type -match '^ent:') { X "$indent<dcssch:value xsi:type=`"$type`">$(Esc-XmlText $valStr)</dcssch:value>" }   # системное перечисление (ent:X) — value несёт тот же xsi:type
 	elseif ($type -match '^decimal') { X "$indent<dcssch:value xsi:type=`"xs:decimal`">$(Esc-XmlText $valStr)</dcssch:value>" }
 	elseif ($type -match '^string') { X "$indent<dcssch:value xsi:type=`"xs:string`">$(Esc-XmlText $valStr)</dcssch:value>" }
-	elseif ($type -match '^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText $valStr)</dcssch:value>" }
+	elseif ($type -match '^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue $valStr))</dcssch:value>" }
 	else {
 		if ($valStr -match '^\d{4}-\d{2}-\d{2}T') { X "$indent<dcssch:value xsi:type=`"xs:dateTime`">$(Esc-XmlText $valStr)</dcssch:value>" }
 		elseif ($valStr -eq "true" -or $valStr -eq "false") { X "$indent<dcssch:value xsi:type=`"xs:boolean`">$(Esc-XmlText $valStr)</dcssch:value>" }
-		elseif ($valStr -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or $valStr -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText $valStr)</dcssch:value>" }
+		elseif ($valStr -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or $valStr -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue $valStr))</dcssch:value>" }
 		else { X "$indent<dcssch:value xsi:type=`"xs:string`">$(Esc-XmlText $valStr)</dcssch:value>" }
 	}
 }
@@ -7182,7 +7228,7 @@ function Emit-DLInputParameters {
 					foreach ($v in @($cpItem.values)) {
 						if ($v -is [bool]) { X "$indent`t`t`t`t<dcscor:value xsi:type=`"xs:boolean`">$(if ($v) { 'true' } else { 'false' })</dcscor:value>" }
 						elseif ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) { X "$indent`t`t`t`t<dcscor:value xsi:type=`"xs:decimal`">$v</dcscor:value>" }
-						else { X "$indent`t`t`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText "$v")</dcscor:value>" }
+						else { X "$indent`t`t`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue "$v"))</dcscor:value>" }
 					}
 					X "$indent`t`t`t</dcscor:item>"
 				}
@@ -7297,8 +7343,8 @@ function Emit-DataParameters {
 			$avtype = "$($dp.valueType)"
 			foreach ($v in @($dp.value)) {
 				$vStr = if ($v -is [bool]) { "$v".ToLower() } else { "$v" }
-				if ($avtype -match '^[a-zA-Z]+:') { X "$indent`t`t<dcscor:value xsi:type=`"$avtype`">$(Esc-XmlText $vStr)</dcscor:value>" }
-				elseif ("$vStr" -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or "$vStr" -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText $vStr)</dcscor:value>" }
+				if ($avtype -match '^[a-zA-Z]+:') { X "$indent`t`t<dcscor:value xsi:type=`"$avtype`">$(Esc-XmlText $(if ($avtype -eq 'dcscor:DesignTimeValue') { Normalize-DesignTimeValue $vStr } else { $vStr }))</dcscor:value>" }
+				elseif ("$vStr" -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or "$vStr" -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue $vStr))</dcscor:value>" }
 				else { X "$indent`t`t<dcscor:value xsi:type=`"xs:string`">$(Esc-XmlText $vStr)</dcscor:value>" }
 			}
 		} elseif ($dp.nilValue -eq $true) {
@@ -7346,7 +7392,7 @@ function Emit-DataParameters {
 			} elseif ($vtype -match '^string') {
 				X "$indent`t`t<dcscor:value xsi:type=`"xs:string`">$(Esc-XmlText "$($dp.value)")</dcscor:value>"
 			} elseif ("$($dp.value)" -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or "$($dp.value)" -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') {
-				X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText "$($dp.value)")</dcscor:value>"
+				X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue "$($dp.value)"))</dcscor:value>"
 			} else {
 				X "$indent`t`t<dcscor:value xsi:type=`"xs:string`">$(Esc-XmlText "$($dp.value)")</dcscor:value>"
 			}
@@ -7964,16 +8010,6 @@ function Get-FormRootRank([string]$tag) {
 	return $i
 }
 
-# Local: closed value sets of the platform enums behind these form properties
-# (FormWindowOpeningMode, AutoTimeMode, PostingModeUse). Upstream accepted any
-# string, and its spec listed values that do not exist (Modeless, Current,
-# Postings, Movements) — the Configurator refuses such a Form.xml on load.
-$script:formPropertyValues = @{
-	"windowOpeningMode" = @("Independent", "LockOwnerWindow", "LockWholeInterface")
-	"autoTime"          = @("DontUse", "First", "Last", "CurrentOrFirst", "CurrentOrLast")
-	"usePostingMode"    = @("Auto", "RealTime", "Regular")
-}
-
 function Emit-Properties {
 	param($props, [string]$indent)
 
@@ -8014,10 +8050,6 @@ function Emit-Properties {
 		$val = $p.Value
 		# Пустая строка = суппресс-маркер (напр. autoTitle:"" — не эмитить и не додумывать)
 		if ($val -is [string] -and $val -eq '') { continue }
-		if ($script:formPropertyValues.ContainsKey($p.Name) -and $script:formPropertyValues[$p.Name] -cnotcontains [string]$val) {
-			[Console]::Error.WriteLine("[ERROR] Недопустимое значение свойства формы '$($p.Name)': '$val'. Допустимые: $($script:formPropertyValues[$p.Name] -join ', ')")
-			exit 1
-		}
 		if ($val -is [bool]) {
 			$val = if ($val) { "true" } else { "false" }
 		}
@@ -8365,7 +8397,7 @@ if ($acbHasInner) {
 
 # 12e. Events — значения как у элементов; null — имя по конвенции (ПриСозданииНаСервере)
 if ($def.events) {
-	# Local: a refusal, not a [WARN] — same reason as the element events above.
+	# Local: an event the platform does not have at all is refused in Test-EventPairs.
 	foreach ($p in $def.events.PSObject.Properties) {
 		if (Get-EventEntry 'Form' $p.Name) { continue }
 		foreach ($v in @($p.Value)) {
@@ -8569,6 +8601,7 @@ if ($formsLeaf -eq 'Forms') {
 				# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 				# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 				# поэтому они идут первыми ветками альтернации и возвращаются как есть.
+				# Local (2026-09-14): processing instructions are protected as well — ` />` inside <?…?> is literal text.
 				$regText = [regex]::Replace($regText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 				# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 				# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.

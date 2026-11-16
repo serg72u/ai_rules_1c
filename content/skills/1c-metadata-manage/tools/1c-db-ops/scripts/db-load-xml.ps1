@@ -1,5 +1,13 @@
 ﻿# db-load-xml v1.38 — Load 1C configuration from XML files
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local (1c-rules): .dev.env first — PLATFORM_PATH (an install dir resolves to bin\1cv8.exe) before
+#   the v8path of the .v8-project.json record / root, PLATFORM_ARGS / IBCMD_ARGS before v8args /
+#   ibcmdargs, the .dev.env directory is a project root for relative infobase paths;
+#   /ConfigurationRepositoryP is masked like /P.
+#   Every Designer launch passes /DumpResult and fails on a non-zero or missing result (Get-DumpResultError).
+#   Repository credentials: .dev.env REPOSITORY_* before the registry record (main configuration only).
+#   Extension applicability check is opt-in (-ApplyCheck): /update1cbase Step 2c is the gate.
+#   Repository hints point at 1c-repository-manage and .dev.env.
 # NB: *nix-раскладку платформы (/opt/1cv8/<ver>/1cv8, без .exe) знает только .py-порт — PS на *nix не исполняется.
 <#
 .SYNOPSIS
@@ -116,6 +124,11 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$NoApplyCheck,
 
+    # 1c-rules: проверить применимость расширения после загрузки. По умолчанию выключено — гейт
+    # применимости /update1cbase Step 2c; с ключом отказ платформы даёт код 1.
+    [Parameter(Mandatory=$false)]
+    [switch]$ApplyCheck,
+
     [Parameter(Mandatory=$false)]
     [string]$RepositoryPath,
 
@@ -204,6 +217,23 @@ function Resolve-RepositorySettings {
             $rec = $dbRec.repository
         }
     }
+    # 1c-rules: .dev.env REPOSITORY_PATH / REPOSITORY_USER / REPOSITORY_PASSWORD (the repository of
+    # the main configuration) win over the registry record; explicit -Repository* still win over
+    # both. An extension's own repository is described only by the registry (extensions[].repository).
+    if (-not $Extension) {
+        $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+        if (Test-Path $__devEnvHelper) {
+            . $__devEnvHelper
+            $__devEnvRepo = Get-1CDevEnvValue 'REPOSITORY_PATH'
+            if ($__devEnvRepo) {
+                $rec = [pscustomobject]@{
+                    path     = $__devEnvRepo
+                    user     = (Get-1CDevEnvValue 'REPOSITORY_USER')
+                    password = (Get-1CDevEnvValue 'REPOSITORY_PASSWORD')
+                }
+            }
+        }
+    }
     $path = if ($RepositoryPath) { $RepositoryPath } elseif ($rec -and $rec.path) { [string]$rec.path } else { $null }
     $user = if ($RepositoryUser) { $RepositoryUser } elseif ($rec -and $rec.user) { [string]$rec.user } else { $null }
     # Пустой пароль = отсутствующий: 1С требует опускать ключ целиком, а не передавать пустое значение.
@@ -230,25 +260,26 @@ function Get-RepositoryArgs {
 
 # Сообщения платформы про хранилище конфигурации называют причину, но не действие. Действие
 # дописываем сами: без него модель упирается в отказ и не знает, чем его лечить.
+# 1c-rules: действие — через навык 1c-repository-manage (repo-ops.ps1), реквизиты — в .dev.env.
 function Write-RepositoryHints {
     param([string]$LogText)
     if (-not $LogText) { return }
     if ($LogText -match 'текущая конфигурация помещена в хранилище') {
         Write-Host "[hint] полная загрузка в базу, подключённую к хранилищу, невозможна." -ForegroundColor Yellow
-        Write-Host "       Используйте -Mode Partial, предварительно захватив объекты: /db-repo lock" -ForegroundColor Yellow
+        Write-Host "       Используйте -Mode Partial, предварительно захватив объекты: 1c-repository-manage, repo-ops -Operation lock -Objects <...>" -ForegroundColor Yellow
     }
     foreach ($m in [regex]::Matches($LogText, 'объект метаданных ([^\s]+) не захвачен в хранилище')) {
         $obj = $m.Groups[1].Value
         if ($obj -eq 'Configuration') {
-            Write-Host "[hint] не захвачен корень конфигурации — он нужен, чтобы добавить или удалить объект:" -ForegroundColor Yellow
-            Write-Host "       /db-repo lock <база> -Objects `"Конфигурация`"" -ForegroundColor Yellow
+            Write-Host "[hint] не захвачен корень конфигурации — он нужен, чтобы добавить или удалить объект верхнего уровня." -ForegroundColor Yellow
+            Write-Host "       Захватите «Конфигурация» через 1c-repository-manage; если инструмент корень не берёт — попросите пользователя захватить его в Конфигураторе" -ForegroundColor Yellow
         } else {
-            Write-Host "[hint] объект не захвачен в хранилище: /db-repo lock <база> -Objects `"$obj`"" -ForegroundColor Yellow
+            Write-Host "[hint] объект не захвачен в хранилище: 1c-repository-manage, repo-ops -Operation lock -Objects `"$obj`"" -ForegroundColor Yellow
         }
     }
     if ($LogText -match 'Соединение с хранилищем конфигурации не установлено') {
         Write-Host "[hint] соединение с хранилищем не установлено. Две причины:" -ForegroundColor Yellow
-        Write-Host "       реквизиты неизвестны — добавьте `"repository`" в запись базы в .v8-project.json (см. /db-list);" -ForegroundColor Yellow
+        Write-Host "       реквизиты неизвестны — задайте REPOSITORY_PATH / REPOSITORY_USER / REPOSITORY_PASSWORD в .dev.env (или -RepositoryPath / -RepositoryUser / -RepositoryPassword);" -ForegroundColor Yellow
         Write-Host "       либо хранилище недоступно — для сетевого проверьте сервер хранилища и порт." -ForegroundColor Yellow
     }
 }
@@ -327,7 +358,6 @@ function Get-ProjectExtraArgs {
         $__devEnvArgs = @(Get-1CDevEnvArgs $__devEnvKey)
         if ($__devEnvArgs.Count -gt 0) { return $__devEnvArgs }
     }
-    $dir = (Get-Location).ProviderPath
     $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
@@ -469,7 +499,8 @@ function Resolve-InfoBasePath {
         $base = $cwd
         $d = $cwd
         for ($i = 0; $i -lt 20 -and $d; $i++) {
-            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            # 1c-rules: the project root is the nearest directory with .dev.env or .v8-project.json.
+            if ((Test-Path -LiteralPath (Join-Path $d ".dev.env")) -or (Test-Path -LiteralPath (Join-Path $d ".v8-project.json"))) { $base = $d; break }
             $parent = [System.IO.Path]::GetDirectoryName($d)
             if ($parent -eq $d) { break }
             $d = $parent
@@ -517,19 +548,15 @@ Assert-InfoBaseExists $InfoBasePath
 
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    # 1c-rules: .dev.env is this project's single source of truth — it wins over
-    # .v8-project.json, which stays supported as the upstream fallback below.
+    # 1c-rules: -V8Path (caller) -> .dev.env PLATFORM_PATH -> v8path of the matching .v8-project.json
+    # database record -> root v8path -> auto-detect. .dev.env is this project's single source of
+    # truth; .v8-project.json stays supported as the upstream fallback below.
     $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
     if (Test-Path $__devEnvHelper) {
         . $__devEnvHelper
         $__devEnvV8 = Get-1CDevEnvValue 'PLATFORM_PATH'
         if ($__devEnvV8) { return $__devEnvV8 }
     }
-    # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
-    # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
-    $dbRec = Find-ProjectDatabase
-    if ($dbRec -and $dbRec.v8path) { return [string]$dbRec.v8path }
-    $dir = (Get-Location).ProviderPath
     # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
     # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
     $dbRec = Find-ProjectDatabase
@@ -822,6 +849,22 @@ function Write-PlatformOutput {
     Write-Host "--- End ---"
 }
 
+# 1c-rules: batch verdict. /DumpResult receives the result of the batch command (0 = success).
+# Read it before trusting exit code 0: a batch command can fail while 1cv8 exits 0, and a missing
+# file means the command never completed (content/rules/designer-batch-checks.md -> The verdict is
+# three signals). Returns '' on success, otherwise the reason to report.
+function Get-DumpResultError {
+    param([string]$ResultFile)
+    $code = ''
+    if ($ResultFile -and (Test-Path -LiteralPath $ResultFile)) {
+        $text = Get-Content -LiteralPath $ResultFile -Raw -ErrorAction SilentlyContinue
+        if ($text) { $code = ($text -replace '[^\d\-]', '') }
+    }
+    if ($code -eq '0') { return '' }
+    if ($code) { return "batch result $code reported by /DumpResult (0 = success)" }
+    return "/DumpResult wrote no result - the batch command did not complete"
+}
+
 function Write-WholeConfigScopeHint {
     # Список задаёт объекты метаданных, а не только файлы: вместе с объектом платформа грузит его
     # дочерние объекты. Корневой Configuration.xml — это объект «Конфигурация», поэтому список с ним
@@ -884,14 +927,15 @@ function Invoke-ApplyCheck {
     $exeDir = Split-Path $Exe -Parent
     $exeLeaf = Split-Path $Exe -Leaf
     $v8 = if ($exeLeaf -match '^ibcmd') { Join-Path $exeDir ("1cv8" + [System.IO.Path]::GetExtension($Exe)) } else { $Exe }
-    if (-not (Test-Path $v8)) { return @{ Skipped = $true; Reason = "1cv8 not found at $v8"; ExitCode = 0; Lines = @() } }
+    if (-not (Test-Path $v8)) { return @{ Skipped = $true; Reason = "1cv8 not found at $v8"; ExitCode = 0; Lines = @(); DumpError = '' } }
     $dir = Join-Path ([IO.Path]::GetTempPath()) "apply_check_$(Get-Random)"
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     try {
         $a = @("DESIGNER") + $ConnArgs + @("/CheckCanApplyConfigurationExtensions")
         if ($Extension) { $a += "-Extension", "`"$Extension`"" }
         $outFile = Join-Path $dir "check_log.txt"
-        $a += "/Out", "`"$outFile`"", "/DisableStartupDialogs"
+        $resultFile = Join-Path $dir "check_result.txt"
+        $a += "/Out", "`"$outFile`"", "/DumpResult", "`"$resultFile`"", "/DisableStartupDialogs"
         $a += $ExtraArgs
         $res = Invoke-PlatformProcess $v8 $a -PreQuoted
         $lines = @()
@@ -899,7 +943,7 @@ function Invoke-ApplyCheck {
             $raw = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
             if ($raw) { $lines = @($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }
         }
-        return @{ Skipped = $false; Reason = ''; ExitCode = $res.ExitCode; Lines = $lines }
+        return @{ Skipped = $false; Reason = ''; ExitCode = $res.ExitCode; Lines = $lines; DumpError = (Get-DumpResultError $resultFile) }
     } finally {
         if ($dir -and (Test-Path $dir)) { Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -914,18 +958,23 @@ function Invoke-ApplyCheckReport {
         Write-Host "[note] applicability check skipped: $($ac.Reason)" -ForegroundColor Yellow
         return $false
     }
-    if ($ac.ExitCode -ne 0 -or $ac.Lines.Count -gt 0) {
+    if ($ac.ExitCode -ne 0 -or $ac.Lines.Count -gt 0 -or $ac.DumpError) {
         Write-Host "[warning] the extension is loaded, but the platform will not apply it:" -ForegroundColor Yellow
         foreach ($l in $ac.Lines) { Write-Host "  $l" -ForegroundColor Yellow }
+        if ($ac.DumpError -and $ac.Lines.Count -eq 0) { Write-Host "  $($ac.DumpError)" -ForegroundColor Yellow }
         return $true
     }
     return $false
 }
 
 # Проверять ли применимость: -NoApplyCheck сильнее настройки проекта.
+# 1c-rules: off by default. /update1cbase Step 2c runs the applicability gate (/CheckModules, then
+# /CheckCanApplyConfigurationExtensions) between load and update; a second Designer pass from the
+# loader would only double it. -ApplyCheck or .v8-project.json extensionApplyCheck=true turn it on.
 function Get-ApplyCheckEnabled {
-    param([switch]$Disabled)
+    param([switch]$Disabled, [switch]$Requested)
     if ($Disabled) { return $false }
+    if ($Requested) { return $true }
     $pf = Find-V8Project (Get-Location).ProviderPath
     if ($pf) {
         try {
@@ -933,7 +982,7 @@ function Get-ApplyCheckEnabled {
             if ($null -ne $proj.extensionApplyCheck) { return [bool]$proj.extensionApplyCheck }
         } catch {}
     }
-    return $true
+    return $false
 }
 
 
@@ -1055,11 +1104,11 @@ try {
             Write-PlatformOutput $applyOut
         }
         # Проверку применимости умеет только 1cv8 — соединение для неё собираем в его форме.
-        if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck)) {
+        if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck -Requested:$ApplyCheck)) {
             $acConn = @("/F", "`"$InfoBasePath`"")
             if ($UserName) { $acConn += "/N`"$UserName`"" }
             if ($Password) { $acConn += "/P`"$Password`"" }
-            if ((Invoke-ApplyCheckReport $V8Path $acConn $Extension @()) -and $StrictLog) { $exitCode = 1 }
+            if ((Invoke-ApplyCheckReport $V8Path $acConn $Extension @()) -and ($StrictLog -or $ApplyCheck)) { $exitCode = 1 }
         }
         exit $exitCode
     }
@@ -1146,6 +1195,7 @@ try {
     # --- Output ---
     $outFile = Join-Path $tempDir "load_log.txt"
     $arguments += "/Out", "`"$outFile`""
+    # 1c-rules: /DumpResult beside /Out - the batch verdict, read right after the launch.
     $resultFile = Join-Path $tempDir "batch_result.txt"
     $arguments += "/DumpResult", "`"$resultFile`""
     $arguments += "/DisableStartupDialogs"
@@ -1155,24 +1205,9 @@ try {
     Write-Host "Running: 1cv8.exe $(Protect-Secrets ((Format-ArgsForDisplay $arguments $engine) -join ' ') @($Password, $UserName, $__repo.Password))"
     $__v8 = Invoke-PlatformProcess $V8Path $arguments -PreQuoted
     $exitCode = $__v8.ExitCode
-
-    # The platform's own batch verdict: /DumpResult writes 0 on success. Read it before
-    # trusting the exit code - a batch command can fail while 1cv8 exits 0 (canon:
-    # content/rules/designer-batch-checks.md -> The verdict is three signals).
     if ($exitCode -eq 0) {
-        $dumpCode = ''
-        if (Test-Path -LiteralPath $resultFile) {
-            $dumpText = Get-Content -LiteralPath $resultFile -Raw -ErrorAction SilentlyContinue
-            if ($dumpText) { $dumpCode = ($dumpText -replace '[^\d\-]', '') }
-        }
-        if ($dumpCode -ne '0') {
-            if ($dumpCode) {
-                Write-Host "[error] batch result $dumpCode reported by /DumpResult (0 = success)" -ForegroundColor Red
-            } else {
-                Write-Host "[error] /DumpResult wrote no result - the batch command did not complete" -ForegroundColor Red
-            }
-            $exitCode = 1
-        }
+        $__dumpError = Get-DumpResultError $resultFile
+        if ($__dumpError) { Write-Host "[error] $__dumpError" -ForegroundColor Red; $exitCode = 1 }
     }
 
     # --- Read log ---
@@ -1214,8 +1249,8 @@ try {
     }
 
     # Расширение могло загрузиться «успешно» и при этом остаться неприменимым — спрашиваем платформу.
-    if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck)) {
-        if ((Invoke-ApplyCheckReport $V8Path $connArgs $Extension $extraArgs) -and $StrictLog) { $exitCode = 1 }
+    if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck -Requested:$ApplyCheck)) {
+        if ((Invoke-ApplyCheckReport $V8Path $connArgs $Extension $extraArgs) -and ($StrictLog -or $ApplyCheck)) { $exitCode = 1 }
     }
 
     exit $exitCode

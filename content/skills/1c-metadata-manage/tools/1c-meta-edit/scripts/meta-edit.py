@@ -1,6 +1,22 @@
 #!/usr/bin/env python3
-# meta-edit v1.70 — Edit existing 1C metadata object XML
-# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# meta-edit v1.73 — Edit existing 1C metadata object XML
+# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills, synced at
+#         2e75b0f483eb020e9f09562d1a7be1982bc5ac6e — the same upstream state the
+#         vendored meta-edit.ps1 was synced from.
+# Licence: MIT, Copyright (c) 2025-2026 Nick Shirokov. Full notice and permission
+#          text: ../../../NOTICE.md (installed as
+#          skills/1c-metadata-manage/NOTICE.md).
+# Local: `add-form` / `add-template` refuse before anything is mutated, for every
+#        key spelling and across the whole definition, and name `form-add` /
+#        `add-template` instead (upstream refuses them too, but inside the
+#        dispatcher and with its own skill names). Auto-validation is a real gate:
+#        the validator is resolved under the downstream directory names
+#        (`1c-meta-validate`; `1c-epf-validate` for an external data processor /
+#        report, which has no Python port and runs through a PowerShell host), its
+#        absence is a failure raised *before* the edit is written (unless
+#        `-NoValidate` opts out explicitly), and a non-zero validator exit makes
+#        meta-edit non-zero. The support guard reads `.dev.env` SUPPORT_GUARD first
+#        and fails closed on an unreadable Ext/ParentConfigurations.bin.
 
 import argparse
 import json
@@ -270,6 +286,9 @@ def assert_edit_allowed(target_path, require):
         parse_ok = False
         try:
             data = open(bin_path, "rb").read()
+            # A state of 32 bytes or less is the empty container left when vendor support was removed completely - nothing is on support, not 'unreadable'.
+            if len(data) <= 32:
+                parse_ok = True
             if len(data) > 32:
                 if data[:3] == b"\xef\xbb\xbf":
                     data = data[3:]
@@ -1006,16 +1025,24 @@ def build_fill_value_xml(indent, type_str):
 
 
 def build_mltext_xml(indent, tag, text):
-    if not text:
+    # Строка → один язык (ru); словарь { "ru": ..., "en": ... } → по элементу на язык.
+    if isinstance(text, dict):
+        pairs = [(str(k), str(v)) for k, v in text.items()]
+    elif text is not None and str(text):
+        pairs = [("ru", str(text))]
+    else:
+        pairs = []
+    if not pairs:
         return f"{indent}<{tag}/>"
-    lines = [
-        f"{indent}<{tag}>",
-        f"{indent}\t<v8:item>",
-        f"{indent}\t\t<v8:lang>ru</v8:lang>",
-        f"{indent}\t\t<v8:content>{esc_xml_text(text)}</v8:content>",
-        f"{indent}\t</v8:item>",
-        f"{indent}</{tag}>",
-    ]
+    lines = [f"{indent}<{tag}>"]
+    for lang, content in pairs:
+        lines += [
+            f"{indent}\t<v8:item>",
+            f"{indent}\t\t<v8:lang>{lang}</v8:lang>",
+            f"{indent}\t\t<v8:content>{esc_xml_text(content)}</v8:content>",
+            f"{indent}\t</v8:item>",
+        ]
+    lines.append(f"{indent}</{tag}>")
     return "\r\n".join(lines)
 
 
@@ -2677,9 +2704,9 @@ def process_add(add_def):
 
         elif child_type in ("forms", "templates"):
             # Форма и макет регистрируются голым текстом (<Form>Имя</Form>) и требуют ещё и
-            # собственных файлов. И то и другое делают form-add / template-add -- дублировать
+            # собственных файлов. И то и другое делают form-add / add-template -- дублировать
             # эту ответственность здесь нельзя: получится висячая регистрация без файла.
-            skill_name = "form-add" if child_type == "forms" else "template-add"
+            skill_name = "form-add" if child_type == "forms" else "add-template"
             what_name = "Форму" if child_type == "forms" else "Макет"
             die(
                 f"{what_name} добавляет навык {skill_name} "
@@ -2728,8 +2755,8 @@ def process_remove(remove_def):
         if child_type == "properties":
             die("Cannot remove properties -- use modify instead")
         if child_type in ("forms", "templates"):
-            # Снять регистрацию мало — надо удалить и файлы; это делают form-remove / template-remove.
-            skill_name = "form-remove" if child_type == "forms" else "template-remove"
+            # Снять регистрацию мало — надо удалить и файлы; это делают remove-form / remove-template.
+            skill_name = "remove-form" if child_type == "forms" else "remove-template"
             what_name = "Форму" if child_type == "forms" else "Макет"
             die(
                 f"{what_name} удаляет навык {skill_name} "
@@ -2794,6 +2821,20 @@ def modify_properties(props_def):
                 prop_el = new_nodes[0]
             else:
                 die(f"Property '{prop_name}': could not create element")
+
+        # Многоязычная строка (синоним, представления, пояснение…): простой текст в таком теге платформа
+        # не загружает. Узел заменяется целиком — и пустой, и уже заполненный.
+        if prop_name in local_string_object_props:
+            ml_nodes = import_fragment(build_mltext_xml(get_child_indent(properties_el), prop_name, prop_value))
+            if ml_nodes:
+                idx = list(properties_el).index(prop_el)
+                ml_nodes[0].tail = prop_el.tail
+                properties_el.insert(idx + 1, ml_nodes[0])
+                remove_node_with_whitespace(prop_el)
+                shown = '; '.join(f"{k}: {v}" for k, v in prop_value.items()) if isinstance(prop_value, dict) else str(prop_value)
+                info(f"Modified property: {prop_name} = {shown}")
+                modify_count += 1
+            continue
 
         # Handle boolean values
         value_str = str(prop_value)
@@ -3229,6 +3270,13 @@ child_modify_keys = [
     "add", "remove", "modify", "name", "type", "synonym", "Format", "EditFormat", "ToolTip", "ChoiceForm", "MinValue",
     "MaxValue", "LinkByType", "ChoiceParameterLinks", "ChoiceParameters", "FillValue",
 ]
+
+# Свойства объекта типа LocalStringType (XSD MDClasses) — modify-property пишет их многоязычной строкой.
+local_string_object_props = {
+    'Synonym', 'ToolTip', 'Explanation', 'ObjectPresentation', 'ExtendedObjectPresentation', 'ListPresentation',
+    'ExtendedListPresentation', 'RecordPresentation', 'ExtendedRecordPresentation', 'ExtendedPresentation',
+    'Format', 'EditFormat',
+}
 
 known_child_props = {
     'AccountingFlag', 'Balance', 'BaseDimension', 'ChoiceFoldersAndItems', 'ChoiceForm', 'ChoiceHistoryOnInput',
@@ -4108,7 +4156,7 @@ def deny_add_form(object_path):
 
 
 def resolve_validate_script():
-    """Path of the sibling validator under its downstream directory name.
+    """Path of the sibling meta-validate under its downstream directory name.
 
     Upstream looks under `meta-validate`; the vendored tree calls it
     `1c-meta-validate`, so the upstream-relative path resolved to nothing and the
@@ -4118,20 +4166,45 @@ def resolve_validate_script():
         "1c-meta-validate", "scripts", "meta-validate.py"))
 
 
-def require_validate_script():
-    """A missing validator is a refusal raised *before* the edit is written.
+EXTERNAL_OBJECT_TYPES = ("ExternalDataProcessor", "ExternalReport")
 
-    `-NoValidate` stays the one explicit opt-out; an absent validator must never
-    degrade into one silently."""
-    script = resolve_validate_script()
-    if os.path.isfile(script):
-        return script
+
+def _refuse_missing_validator(reason):
     sys.stderr.write(
-        f"[ERROR] Обязательная автопроверка не может быть выполнена: meta-validate не найден "
-        f"по пути {script}.\n"
+        f"[ERROR] Обязательная автопроверка не может быть выполнена: {reason}\n"
         "        Правка не применена. Восстановите навык целиком либо запустите с "
         "-NoValidate, если проверка сознательно не нужна.\n")
     sys.exit(1)
+
+
+def require_validator(object_type):
+    """The validator command for this object, resolved *before* the edit is written.
+
+    Returns (skill name, argv without -ObjectPath). A missing validator is a
+    refusal, never a silent [SKIP]; `-NoValidate` stays the one explicit opt-out.
+
+    An external data processor / report is an autonomous object that meta-validate
+    does not know (upstream #108, 372510bb); its validator is epf-validate, which
+    this package ships for PowerShell only (`1c-epf-validate/scripts/epf-validate.ps1`).
+    It runs through `pwsh` / `powershell` when one is on PATH; without a PowerShell
+    host the edit is refused before it is written."""
+    if object_type not in EXTERNAL_OBJECT_TYPES:
+        script = resolve_validate_script()
+        if not os.path.isfile(script):
+            _refuse_missing_validator(f"meta-validate не найден по пути {script}.")
+        return "meta-validate", [sys.executable, "-B", script]
+    epf_ps1 = os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..",
+        "1c-epf-validate", "scripts", "epf-validate.ps1"))
+    if not os.path.isfile(epf_ps1):
+        _refuse_missing_validator(f"epf-validate не найден по пути {epf_ps1}.")
+    import shutil
+    host = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)
+    if not host:
+        _refuse_missing_validator(
+            f"внешнюю обработку / отчёт проверяет epf-validate ({epf_ps1}), у него нет "
+            "Python-версии, а PowerShell-хост (pwsh) не найден в PATH. Установите pwsh.")
+    return "epf-validate", [host, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", epf_ps1]
 
 
 def main():
@@ -4187,7 +4260,8 @@ def main():
     # and the Configurator does not recover from it — the result of the earlier
     # silent success. Fixing the builder means reimplementing the whole managed
     # scaffold that 1c-form-scaffold already owns, so the contract here is: refuse,
-    # and name the working command. Removal (remove-form) is untouched.
+    # and name the working command. Removal is refused in process_remove and
+    # points at remove-form / remove-template.
     if definition_adds_form(definition) or args.Operation == "add-form":
         deny_add_form(args.ObjectPath)
 
@@ -4205,9 +4279,6 @@ def main():
             "        TemplateType: HTML, Text, SpreadsheetDocument, BinaryData, DataCompositionSchema.\n"
             "        Python-версия add-template пока не поставляется.\n")
         sys.exit(2)
-
-    # --- Local gate 2: the validator has to exist *before* the edit, not after ---
-    validate_script = require_validate_script() if not args.NoValidate else None
 
     # --- Resolve object path ---
     object_path = args.ObjectPath
@@ -4289,6 +4360,12 @@ def main():
 
     info(f"Object: {obj_type}.{obj_name}")
 
+    # --- Local gate 2: the validator has to exist *before* the edit, not after ---
+    # Resolved once the object type is known (EPF/ERF have their own validator);
+    # nothing has been written yet — the XML is only saved after the dispatcher.
+    validate_skill, validate_argv = (require_validator(obj_type) if not args.NoValidate
+                                     else ("", []))
+
     # --- Inline mode conversion ---
     if args.Operation:
         definition = convert_inline_to_definition(args.Operation, args.Value or "")
@@ -4341,35 +4418,22 @@ def main():
 
     # --- Auto-validate ---
     # Local: the path is resolved and its existence enforced before the edit (see
-    # require_validate_script above). Here only the run remains — and its exit code
+    # require_validator above). Here only the run remains — and its exit code
     # decides ours: a child that reported errors must not be summarized as a
     # successful edit.
     validate_exit_code = 0
     if not args.NoValidate:
-        # Внешняя обработка/отчёт — автономный объект, meta-validate его не знает (#108).
-        validate_skill = "epf-validate" if obj_type in ("ExternalDataProcessor", "ExternalReport") else "meta-validate"
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # 1c-rules: валидатор — соседнее дерево навыка (1c-<имя>), а не upstream's ../../<skill>,
-        # и его код возврата пробрасывается: иначе провал проверки скрыт, а правка уходит в базу.
-        validate_py = os.path.normpath(os.path.join(script_dir, "..", "..", "1c-" + validate_skill, "scripts", f"{validate_skill}.py"))
-        validate_ps = validate_py[:-3] + ".ps1"
-        validate_exit_code = 0
-        validate_cmd = None
-        if os.path.exists(validate_py):
-            validate_cmd = [sys.executable, "-B", validate_py, "-ObjectPath", resolved_path]
-        elif os.path.exists(validate_ps):
-            validate_cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", validate_ps, "-ObjectPath", resolved_path]
-        if validate_cmd is None:
-            sys.stderr.write(f"[ERROR] {validate_skill} не найден рядом с meta-edit. Изменение записано, но не проверено.\n")
-            validate_exit_code = 1
-        else:
-            print()
-            print(f"--- Running {validate_skill} ---")
-            sys.stdout.flush()
-            completed = subprocess.run(validate_cmd)
-            validate_exit_code = completed.returncode
-            if validate_exit_code != 0:
-                sys.stderr.write(f"[ERROR] {validate_skill} завершился с кодом {validate_exit_code}: изменение записано, но объект не проходит проверку. Разберите вывод выше перед загрузкой в базу.\n")
+        print()
+        print(f"--- Running {validate_skill} ---")
+        # Буфер stdout сбросить до запуска: иначе вывод дочернего процесса обгоняет наш.
+        sys.stdout.flush()
+        completed = subprocess.run(validate_argv + ["-ObjectPath", resolved_path])
+        validate_exit_code = completed.returncode
+        if validate_exit_code != 0:
+            sys.stderr.write(
+                f"[ERROR] {validate_skill} завершился с кодом {validate_exit_code}: изменение "
+                f"записано, но объект не проходит проверку. Разберите вывод выше перед "
+                f"загрузкой в базу.\n")
 
     # --- Summary ---
     print()

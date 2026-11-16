@@ -1,5 +1,14 @@
-﻿# form-edit v1.39 — Edit 1C managed form elements
+﻿# form-edit v1.46 — Edit 1C managed form elements
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: a DynamicList attribute requires settings.mainTable or settings.query —
+# without a source the form loads into the Designer but fails to open
+# ("не задан ни текст запроса, ни основная таблица"). Support guard from .dev.env
+# SUPPORT_GUARD, fail-closed on an unreadable support state. (The local button /
+# command child order and the command TextPicture spelling of 2026-10-01 are
+# upstream since bd0081c2 / 14f1126b; compact XML and the target EOL since #57.)
+# Local (2026-11-08): `input` key autoEditMode → <AutoEditMode> on add and on
+# `set` (format 2.21 only, boolean only, placed before Width per XSD via
+# childTagOrder); the emitter change is mirrored in form-compile.ps1.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
@@ -17,14 +26,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -37,10 +55,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	# PS 7 wraps a NON-array in a List<object> for -NoEnumerate, so the caller's
-	# $def.PSObject.Properties would list List members (Capacity, Count, …) instead of the
-	# JSON keys and every operation would be 'unknown'. Only arrays need the switch.
-	if ($parsed -is [System.Array]) { Write-Output -NoEnumerate $parsed } else { return $parsed }
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -81,10 +96,12 @@ function Read-JsonInputFile([string]$path) {
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 # --- Support guard (Ext/ParentConfigurations.bin) ---
-# See docs/1c-support-state-spec.md. Blocks edits of vendor objects "на замке" /
+# Canon: docs/support-manage.md. Blocks edits of vendor objects "на замке" /
 # read-only configs unless allowed. Trigger = bin present; reaction from
-# .v8-project.json editingAllowedCheck (deny|warn|off, default deny). Never
-# throws — guard errors degrade to allow.
+# .dev.env SUPPORT_GUARD (deny|warn|off, default deny; .v8-project.json
+# editingAllowedCheck stays as the upstream fallback). Fail-closed on an
+# unreadable support state (bin exists but cannot be parsed — same reaction);
+# other guard errors degrade to allow with a stderr notice.
 function Get-RootUuid([string]$xmlPath) {
 	if (-not (Test-Path $xmlPath)) { return $null }
 	try {
@@ -172,15 +189,33 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		# New object (no element file): fall back to config root uuid.
 		if (-not $elemUuid -and $cfgDir) { $elemUuid = Get-RootUuid (Join-Path $cfgDir "Configuration.xml") }
 		if (-not $binPath -or -not (Test-Path $binPath)) { return }
-		$bytes = [System.IO.File]::ReadAllBytes($binPath)
-		if ($bytes.Length -le 32) { return }
-		$start = 0
-		if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
-		$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
-		$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
-		if (-not $hm.Success) { return }
-		$G = [int]$hm.Groups[1].Value
-		$K = [int]$hm.Groups[2].Value
+		# Bin present: an unreadable / unparseable support state must not silently
+		# degrade to allow — fail closed via the SUPPORT_GUARD reaction instead.
+		$G = 0; $K = 0; $text = $null; $parseOk = $false
+		try {
+			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
+			if ($bytes.Length -gt 32) {
+				$start = 0
+				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+				$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
+				$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
+				if ($hm.Success) {
+					$G = [int]$hm.Groups[1].Value
+					$K = [int]$hm.Groups[2].Value
+					$parseOk = $true
+				}
+			}
+		} catch {}
+		if (-not $parseOk) {
+			$mode = Get-EditMode $cfgDir
+			if ($mode -eq 'off') { return }
+			$msg = "[support-guard] Файл состояния поддержки «$binPath» существует, но не читается или не разбирается — состояние объекта неизвестно, он может быть на замке."
+			if ($mode -eq 'warn') { [Console]::Error.WriteLine("$msg Продолжаю по SUPPORT_GUARD=warn."); return }
+			[Console]::Error.WriteLine("$msg`nРедактирование остановлено (fail-closed). Проверьте целостность выгрузки, либо задайте SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md).")
+			exit 1
+		}
 		if ($K -eq 0) { return }
 		$best = $null
 		if ($elemUuid) {
@@ -206,7 +241,7 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		if ($mode -eq 'warn') { [Console]::Error.WriteLine("[support-guard] ПРЕДУПРЕЖДЕНИЕ: $reason. Цель: $rp"); return }
 		$head = "[support-guard] Редактирование отклонено: это объект типовой конфигурации на поддержке поставщика, прямое редактирование молча сломает будущие обновления."
 		$cfe = "Рекомендуемый путь: внести доработку в расширение (навыки cfe-borrow / cfe-patch-method) — состояние поддержки менять не нужно, обновления вендора сохраняются."
-		$offNote = "Снять проверку для этой базы: editingAllowedCheck = warn|off в .v8-project.json."
+		$offNote = "Снять проверку: SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md)."
 		if ($code -eq "capability-off") {
 			$state = "Состояние: у всей конфигурации выключена возможность изменения (режим read-only «из коробки») — поэтому объект «$rp» редактировать нельзя."
 			$fix = "Либо снять защиту явно (навык support-edit, два шага):`n  1. support-edit -Path ""$cfgDir"" -Capability on — включить возможность изменения (объекты пока остаются на замке);`n  2. support-edit -Path ""$rp"" -Set editable — открыть этот объект для редактирования.`n  Изменение применяется в базу полной загрузкой выгрузки и обходит механизм обновлений вендора."
@@ -219,7 +254,10 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		}
 		[Console]::Error.WriteLine("$head`n$state`n$cfe`n$fix`n$offNote")
 		exit 1
-	} catch { return }
+	} catch {
+		[Console]::Error.WriteLine("[support-guard] Проверка состояния поддержки не выполнена ($($_.Exception.Message)) — продолжаю без блокировки.")
+		return
+	}
 }
 
 # === 1. Load Form.xml ===
@@ -1765,7 +1803,7 @@ $script:childTagOrder = @{
 	'GanttChartField' = 'DataPath DefaultItem TitleLocation Width Height HorizontalStretch VerticalStretch ContextMenu ExtendedTooltip Table Events'
 	'GraphicalSchemaField' = 'DataPath DefaultItem ReadOnly Title TitleLocation WarningOnEditRepresentation Width Height Edit ContextMenu ExtendedTooltip Events'
 	'HTMLDocumentField' = 'DataPath DefaultItem Enabled ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation ToolTipRepresentation Visible WarningOnEditRepresentation Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch Output BorderColor ContextMenu ExtendedTooltip Events'
-	'InputField' = 'DataPath Visible UserVisible DefaultItem Enabled ReadOnly SkipOnInput Title TitleBackColor TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation WarningOnEditRepresentation WarningOnEdit Shortcut HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign EditMode CellHyperlink FixingInTable AutoCellHeight ShowInHeader HeaderHorizontalAlign HeaderPicture ShowInFooter FooterDataPath FooterText FooterTextColor FooterFont FooterHorizontalAlign FooterPicture Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch AllowInputEmptyMultipleValues MultipleValuesFont MultipleValuesTextColor MultipleValuesBackColor VerticalStretch Wrap MarkNegatives PasswordMode MultiLine ExtendedEdit DropListButton ChoiceButton ChoiceButtonRepresentation ClearButton SpinButton OpenButton CreateButton Mask ListChoiceMode ExtendedEditMultipleValues AutoChoiceIncomplete Format MultipleValuePictureShape QuickChoice ChoiceFoldersAndItems EditFormat AutoMarkIncomplete ChooseType AutoShowOpenButtonMode IncompleteChoiceMode ShowCheckBoxesInDropList MultipleValueDataPath MultipleValuePictureDataPath MultipleValuePresentDataPath SpellCheckingOnTextInput TypeDomainEnabled TextEdit AvailableTypes ChoiceForm ChoiceParameterLinks ChoiceParameters EditTextUpdate MinValue ChoiceButtonPicture MaxValue ChoiceList AutoCorrectionOnTextInput AutoShowClearButtonMode ChoiceListButton ChoiceListHeight DropListWidth TextColor BackColor BorderColor Font HeightControlVariant SpecialTextInputMode InputHint ChoiceHistoryOnInput TypeLink ContextMenu ExtendedTooltip Events'
+	'InputField' = 'DataPath Visible UserVisible DefaultItem Enabled ReadOnly SkipOnInput Title TitleBackColor TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation WarningOnEditRepresentation WarningOnEdit Shortcut HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign EditMode CellHyperlink FixingInTable AutoCellHeight ShowInHeader HeaderHorizontalAlign HeaderPicture ShowInFooter FooterDataPath FooterText FooterTextColor FooterFont FooterHorizontalAlign FooterPicture AutoEditMode Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch AllowInputEmptyMultipleValues MultipleValuesFont MultipleValuesTextColor MultipleValuesBackColor VerticalStretch Wrap MarkNegatives PasswordMode MultiLine ExtendedEdit DropListButton ChoiceButton ChoiceButtonRepresentation ClearButton SpinButton OpenButton CreateButton Mask ListChoiceMode ExtendedEditMultipleValues AutoChoiceIncomplete Format MultipleValuePictureShape QuickChoice ChoiceFoldersAndItems EditFormat AutoMarkIncomplete ChooseType AutoShowOpenButtonMode IncompleteChoiceMode ShowCheckBoxesInDropList MultipleValueDataPath MultipleValuePictureDataPath MultipleValuePresentDataPath SpellCheckingOnTextInput TypeDomainEnabled TextEdit AvailableTypes ChoiceForm ChoiceParameterLinks ChoiceParameters EditTextUpdate MinValue ChoiceButtonPicture MaxValue ChoiceList AutoCorrectionOnTextInput AutoShowClearButtonMode ChoiceListButton ChoiceListHeight DropListWidth TextColor BackColor BorderColor Font HeightControlVariant SpecialTextInputMode InputHint ChoiceHistoryOnInput TypeLink ContextMenu ExtendedTooltip Events'
 	'LabelDecoration' = 'UserVisible Visible Enabled Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch VerticalStretch SkipOnInput TextColor Font Shortcut Title ToolTip ToolTipRepresentation GroupHorizontalAlign GroupVerticalAlign Hyperlink HorizontalAlign VerticalAlign BackColor BorderColor Border TitleHeight ContextMenu ExtendedTooltip Events'
 	'LabelField' = 'DataPath Visible Enabled UserVisible DefaultItem ReadOnly SkipOnInput Title TitleTextColor TitleFont TitleLocation TitleHeight ToolTip ToolTipRepresentation HorizontalAlign VerticalAlign GroupHorizontalAlign GroupVerticalAlign WarningOnEditRepresentation WarningOnEdit EditMode FixingInTable CellHyperlink AutoCellHeight FooterText ShowInHeader HeaderHorizontalAlign FooterDataPath HeaderPicture ShowInFooter FooterHorizontalAlign Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HorizontalStretch MarkNegatives VerticalStretch Format Border BorderColor Hiperlink PasswordMode TextColor BackColor Font ContextMenu ExtendedTooltip Events'
 	'Page' = 'Visible Enabled ReadOnly EnableContentChange UserVisible Title GroupVerticalAlign Shortcut TitleTextColor TitleFont ToolTip ToolTipRepresentation Width Height HorizontalStretch VerticalStretch ChildrenAlign Picture Format Group ChildItemsWidth HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign ShowTitle BackColor TitleDataPath ScrollOnCompress ExtendedTooltip ChildItems'
@@ -1956,6 +1994,25 @@ $script:refRootSynonyms = @{
 
 $script:enumValueSynonyms = @("EnumValue","ЗначениеПеречисления")
 
+# Значение ссылки в dcscor:DesignTimeValue (отборы, параметры) — к виду Конфигуратора:
+# "Enum.X.EnumValue.Y" / "Enum.X.Y" → "Перечисление.X.Y", "Catalog.X.EmptyRef" → "Справочник.X.ПустаяСсылка".
+# Вид с сегментом EnumValue платформа не разрешает: сравнение с ним всегда ложно (замер 8.3.24).
+$script:designTimeRefRoots = @{
+	"Enum" = "Перечисление"; "Catalog" = "Справочник"; "Document" = "Документ"; "ChartOfAccounts" = "ПланСчетов"
+	"ChartOfCharacteristicTypes" = "ПланВидовХарактеристик"; "ChartOfCalculationTypes" = "ПланВидовРасчета"
+	"ExchangePlan" = "ПланОбмена"; "BusinessProcess" = "БизнесПроцесс"; "Task" = "Задача"
+}
+function Normalize-DesignTimeValue([string]$v) {
+	$parts = @($v -split '\.')
+	if ($parts.Count -lt 3) { return $v }
+	if ($script:designTimeRefRoots.ContainsKey($parts[0])) { $parts[0] = $script:designTimeRefRoots[$parts[0]] }
+	if ($parts[0] -ceq 'Перечисление' -and $parts.Count -ge 4 -and $script:enumValueSynonyms -contains $parts[2]) {
+		$parts = @($parts[0], $parts[1]) + $parts[3..($parts.Count - 1)]
+	}
+	if ($parts[-1] -ceq 'EmptyRef') { $parts[-1] = 'ПустаяСсылка' }
+	return ($parts -join '.')
+}
+
 $script:formRootTagOrder = 'Title Width Height WindowOpeningMode EnterKeyBehavior AutoSaveDataInSettings SaveDataInSettings SaveWindowSettings SettingsStorage AutoTitle AutoURL Group HorizontalAlign ChildItemsWidth VerticalAlign HorizontalSpacing VerticalSpacing AutoFillCheck Customizable Enabled ChildrenAlign CommandBarLocation VerticalScroll ScalingMode ConversationsRepresentation MobileDeviceCommandBarContent CommandSet AutoTime UsePostingMode RepostOnWrite ReportResult DetailsData ReportFormType ShowTitle ShowCloseButton GroupList CollapseItemsByImportanceVariant UseForFoldersAndItems VariantAppearance AutoShowState CustomSettingsFolder ReportResultViewMode ViewModeApplicationOnSetReportResult Scale AutoCommandBar Events ChildItems Attributes Commands Parameters CommandInterface BaseForm'
 
 function Resolve-TextFromFile {
@@ -2083,7 +2140,7 @@ function Parse-FilterShorthand {
 			if ($valPart -eq "true" -or $valPart -eq "false") { $result.value = [bool]($valPart -eq "true"); $result["valueType"] = "xs:boolean" }
 			elseif ($valPart -match '^\d{4}-\d{2}-\d{2}T') { $result.value = $valPart }  # дата без valueType → Emit-FilterItem выведет StandardBeginningDate Custom (дефолт даты в фильтре)
 			elseif ($valPart -match '^\d+(\.\d+)?$') { $result.value = $valPart; $result["valueType"] = "xs:decimal" }
-			elseif ($valPart -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета)\.') { $result.value = $valPart; $result["valueType"] = "dcscor:DesignTimeValue" }
+			elseif ($valPart -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|ПланОбмена|Enum|Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|ExchangePlan)\.[^.]+\.[^.]+') { $result.value = $valPart; $result["valueType"] = "dcscor:DesignTimeValue" }
 			else { $result.value = $valPart; $result["valueType"] = "xs:string" }
 		}
 	} else { $result.field = $s }
@@ -2157,7 +2214,7 @@ function Emit-FilterItem {
 					elseif ("$v" -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена|Catalog|Enum|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { $vt = 'dcscor:DesignTimeValue' }
 					else { $vt = 'xs:string' }
 				}
-				$vStr = if ($v -is [bool]) { "$v".ToLower() } else { Esc-XmlText "$v" }
+				$vStr = if ($v -is [bool]) { "$v".ToLower() } elseif ($vt -eq 'dcscor:DesignTimeValue') { Esc-XmlText (Normalize-DesignTimeValue "$v") } else { Esc-XmlText "$v" }
 				$nsAttr = Get-ValueTypeNsAttr -valueType $vt -value "$v"
 				X "$indent`t<dcsset:right$nsAttr xsi:type=`"$vt`">$vStr</dcsset:right>"
 			}
@@ -2202,7 +2259,7 @@ function Emit-FilterItem {
 			elseif ("$v" -match '^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена|Catalog|Enum|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { $vt = "dcscor:DesignTimeValue" }
 			else { $vt = "xs:string" }
 		}
-		$vStr = if ($item.value -is [bool]) { "$($item.value)".ToLower() } else { Esc-XmlText "$($item.value)" }
+		$vStr = if ($item.value -is [bool]) { "$($item.value)".ToLower() } elseif ($vt -eq 'dcscor:DesignTimeValue') { Esc-XmlText (Normalize-DesignTimeValue "$($item.value)") } else { Esc-XmlText "$($item.value)" }
 		$nsAttr = Get-ValueTypeNsAttr -valueType $vt -value "$($item.value)"
 		X "$indent`t<dcsset:right$nsAttr xsi:type=`"$vt`">$vStr</dcsset:right>"
 	}
@@ -3334,6 +3391,8 @@ function Emit-Element {
 		# InputField choice-скаляры
 		"choiceListButton"=1;"quickChoice"=1;"autoChoiceIncomplete"=1
 		"choiceForm"=1;"choiceHistoryOnInput"=1;"footerDataPath"=1;"minValue"=1;"maxValue"=1
+		# InputField — авто-режим редактирования (local, формат 2.21)
+		"autoEditMode"=1
 		# Button — пометка toggle-кнопки (ключ 'checked', не 'check' — во избежание конфликта с типом)
 		"checked"=1
 	}
@@ -3970,8 +4029,14 @@ function Emit-Group {
 	if ($el.currentRowUse) { X "$inner<CurrentRowUse>$($el.currentRowUse)</CurrentRowUse>" }
 
 	# ShowTitle
-	# ShowTitle=true — умолчание платформы (в корпусе только false): пишем лишь false
-	if ($null -ne $el.showTitle -and -not $el.showTitle) { X "$inner<ShowTitle>false</ShowTitle>" }
+	# Обычная группа без showTitle: заголовок показан, если он задан (title или titleDataPath), иначе скрыт — служебная группа
+	# раскладки без заголовка давала бы пустую строку-заголовок (умолчание платформы — показан).
+	# У сворачиваемой/всплывающей заголовок — переключатель: умолчание платформы, пишется лишь явный false.
+	if (@('collapsible','popup') -contains $behaviorVal) {
+		if ($null -ne $el.showTitle -and -not $el.showTitle) { X "$inner<ShowTitle>false</ShowTitle>" }
+	} elseif ($null -ne $el.showTitle) {
+		if (-not ($el.showTitle -eq $true)) { X "$inner<ShowTitle>false</ShowTitle>" }
+	} elseif (-not $el.title -and -not $el.titleDataPath) { X "$inner<ShowTitle>false</ShowTitle>" }
 	# Заголовок свёрнутого представления (collapsible/popup) — мультиязычный текст
 	if ($el.collapsedTitle) { Emit-MLText -tag "CollapsedRepresentationTitle" -text $el.collapsedTitle -indent $inner }
 
@@ -4077,6 +4142,13 @@ function Emit-Input {
 	if ($null -ne $el.choiceListButton) { X "$inner<ChoiceListButton>$(if ($el.choiceListButton){'true'}else{'false'})</ChoiceListButton>" }
 	if ($null -ne $el.markIncomplete) { X "$inner<AutoMarkIncomplete>$(if ($el.markIncomplete){'true'}else{'false'})</AutoMarkIncomplete>" }
 	if ($el.editMode) { X "$inner<EditMode>$($el.editMode)</EditMode>" }
+	# Local: AutoEditMode — свойство поля формата 2.21 (8.5), xs:boolean без умолчания: пишется заданное
+	# значение. Место по XSD — конец свойств поля, перед Width (держит childTagOrder).
+	if ($null -ne $el.autoEditMode) {
+		if (-not ($el.autoEditMode -is [bool])) { [Console]::Error.WriteLine("[ERROR] Element '$name': autoEditMode — true или false, получено '$($el.autoEditMode)'"); exit 1 }
+		if ((Get-FormatRank $script:formatVersion) -lt 221) { [Console]::Error.WriteLine("[ERROR] Element '$name': autoEditMode (<AutoEditMode>) есть только в формате 2.21 (8.5), у формы — $($script:formatVersion)"); exit 1 }
+		X "$inner<AutoEditMode>$(if ($el.autoEditMode){'true'}else{'false'})</AutoEditMode>"
+	}
 	Emit-ColumnPics -el $el -indent $inner
 	if ($el.textEdit -eq $false) { X "$inner<TextEdit>false</TextEdit>" }
 	# InputField-специфичные скаляры (захват «как есть»: платформа эмитит явное не-дефолтное значение)
@@ -5377,11 +5449,11 @@ function Emit-DLValue {
 	elseif ($type -match '^ent:') { X "$indent<dcssch:value xsi:type=`"$type`">$(Esc-XmlText $valStr)</dcssch:value>" }   # системное перечисление (ent:X) — value несёт тот же xsi:type
 	elseif ($type -match '^decimal') { X "$indent<dcssch:value xsi:type=`"xs:decimal`">$(Esc-XmlText $valStr)</dcssch:value>" }
 	elseif ($type -match '^string') { X "$indent<dcssch:value xsi:type=`"xs:string`">$(Esc-XmlText $valStr)</dcssch:value>" }
-	elseif ($type -match '^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText $valStr)</dcssch:value>" }
+	elseif ($type -match '^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue $valStr))</dcssch:value>" }
 	else {
 		if ($valStr -match '^\d{4}-\d{2}-\d{2}T') { X "$indent<dcssch:value xsi:type=`"xs:dateTime`">$(Esc-XmlText $valStr)</dcssch:value>" }
 		elseif ($valStr -eq "true" -or $valStr -eq "false") { X "$indent<dcssch:value xsi:type=`"xs:boolean`">$(Esc-XmlText $valStr)</dcssch:value>" }
-		elseif ($valStr -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or $valStr -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText $valStr)</dcssch:value>" }
+		elseif ($valStr -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or $valStr -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent<dcssch:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue $valStr))</dcssch:value>" }
 		else { X "$indent<dcssch:value xsi:type=`"xs:string`">$(Esc-XmlText $valStr)</dcssch:value>" }
 	}
 }
@@ -5426,7 +5498,7 @@ function Emit-DLInputParameters {
 					foreach ($v in @($cpItem.values)) {
 						if ($v -is [bool]) { X "$indent`t`t`t`t<dcscor:value xsi:type=`"xs:boolean`">$(if ($v) { 'true' } else { 'false' })</dcscor:value>" }
 						elseif ($v -is [int] -or $v -is [long] -or $v -is [double] -or $v -is [decimal]) { X "$indent`t`t`t`t<dcscor:value xsi:type=`"xs:decimal`">$v</dcscor:value>" }
-						else { X "$indent`t`t`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText "$v")</dcscor:value>" }
+						else { X "$indent`t`t`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue "$v"))</dcscor:value>" }
 					}
 					X "$indent`t`t`t</dcscor:item>"
 				}
@@ -5541,8 +5613,8 @@ function Emit-DataParameters {
 			$avtype = "$($dp.valueType)"
 			foreach ($v in @($dp.value)) {
 				$vStr = if ($v -is [bool]) { "$v".ToLower() } else { "$v" }
-				if ($avtype -match '^[a-zA-Z]+:') { X "$indent`t`t<dcscor:value xsi:type=`"$avtype`">$(Esc-XmlText $vStr)</dcscor:value>" }
-				elseif ("$vStr" -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or "$vStr" -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText $vStr)</dcscor:value>" }
+				if ($avtype -match '^[a-zA-Z]+:') { X "$indent`t`t<dcscor:value xsi:type=`"$avtype`">$(Esc-XmlText $(if ($avtype -eq 'dcscor:DesignTimeValue') { Normalize-DesignTimeValue $vStr } else { $vStr }))</dcscor:value>" }
+				elseif ("$vStr" -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or "$vStr" -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') { X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue $vStr))</dcscor:value>" }
 				else { X "$indent`t`t<dcscor:value xsi:type=`"xs:string`">$(Esc-XmlText $vStr)</dcscor:value>" }
 			}
 		} elseif ($dp.nilValue -eq $true) {
@@ -5590,7 +5662,7 @@ function Emit-DataParameters {
 			} elseif ($vtype -match '^string') {
 				X "$indent`t`t<dcscor:value xsi:type=`"xs:string`">$(Esc-XmlText "$($dp.value)")</dcscor:value>"
 			} elseif ("$($dp.value)" -match '^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.' -or "$($dp.value)" -match '^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.') {
-				X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText "$($dp.value)")</dcscor:value>"
+				X "$indent`t`t<dcscor:value xsi:type=`"dcscor:DesignTimeValue`">$(Esc-XmlText (Normalize-DesignTimeValue "$($dp.value)"))</dcscor:value>"
 			} else {
 				X "$indent`t`t<dcscor:value xsi:type=`"xs:string`">$(Esc-XmlText "$($dp.value)")</dcscor:value>"
 			}
@@ -6727,7 +6799,7 @@ function Invoke-Add($op, [string]$typeKey, [int]$idx) {
 	Assert-Placement $script:dslTagMap[$typeKey] $name $null $pos.Container $ctx
 
 	# Эмиттеру — копия элемента без ключей позиции (это не свойства элемента)
-	$el = ($op | ConvertTo-Json -Depth 100 -Compress | ConvertFrom-Json) | Select-Object -Property * -ExcludeProperty into, after, before, first
+	$el = (ConvertFrom-JsonInput ($op | ConvertTo-Json -Depth 100 -Compress) 'element copy') | Select-Object -Property * -ExcludeProperty into, after, before, first
 	Normalize-ElementSynonyms $el
 	# Таблица динамического списка получает поведение списка, как в form-compile
 	foreach ($a in $root.SelectNodes("f:Attributes/f:Attribute", $nsMgr)) {
@@ -7201,7 +7273,7 @@ function Invoke-SetProbe($node, $props) {
 	$dp = $node.SelectSingleNode("f:DataPath", $nsMgr)
 	if ($null -ne $dp) { $h['path'] = $dp.InnerText }
 	foreach ($k in $props.Keys) { $h[$k] = $props[$k] }
-	$el = [pscustomobject]$h | ConvertTo-Json -Depth 100 -Compress | ConvertFrom-Json
+	$el = ConvertFrom-JsonInput ([pscustomobject]$h | ConvertTo-Json -Depth 100 -Compress) 'element from XML'
 	Normalize-ElementSynonyms $el
 	foreach ($a in $root.SelectNodes("f:Attributes/f:Attribute", $nsMgr)) {
 		$t = $a.SelectSingleNode("f:Type/v8:Type", $nsMgr)
@@ -8176,7 +8248,7 @@ function Insert-SectionChild($parent, $child, [string]$indent = $null) {
 	Insert-NodeAt $parent $child $ref $indent
 }
 
-function New-DslSpec($h) { return ([pscustomobject]$h | ConvertTo-Json -Depth 100 -Compress | ConvertFrom-Json) }
+function New-DslSpec($h) { return (ConvertFrom-JsonInput ([pscustomobject]$h | ConvertTo-Json -Depth 100 -Compress) 'DSL spec') }
 
 # Узел секции по имени (имена в 1С регистронезависимы)
 function Find-SectionItem([string]$section, [string]$tag, [string]$name) {
@@ -8481,25 +8553,20 @@ function Set-DynListSettings($node, $v, [string]$ind, [string]$c) {
 }
 
 # Новый реквизит формы — как в form-compile; id — из пула формы
-# 1c-rules: a DynamicList form attribute without a data source loads into the designer but the
-# form does not open ("не задан ни текст запроса, ни основная таблица"). Upstream fills a
-# MainTable heuristically but never refuses the empty case, so the check is kept here.
-function Test-IsDynamicListType {
-	param([string]$typeStr)
-	return ($typeStr -eq "DynamicList" -or $typeStr -eq "cfg:DynamicList")
-}
-
-function Test-DynamicListSource {
-	param($settings)
-	if (-not $settings) { return $false }
-	$main = "$($settings.mainTable)".Trim()
-	$query = "$($settings.query)".Trim()
-	return ($main -ne "" -or $query -ne "")
-}
-
 function Add-FormAttribute($attr, [int]$idx) {
 	$ctx = "attributes[$idx] '$($attr.name)'"
 	Assert-OpKeys $attr $script:attrKeys $ctx
+	# Local (2026-09-10): a dynamic list needs a source. Without MainTable and QueryText
+	# the form loads into the Designer but fails to open («не задан ни текст запроса, ни
+	# основная таблица»); form-validate reports the same gap on an existing form.
+	if (@('DynamicList', 'cfg:DynamicList') -contains "$($attr.type)".Trim()) {
+		$dlMain = if ($attr.settings) { "$($attr.settings.mainTable)".Trim() } else { '' }
+		$dlQuery = if ($attr.settings) { "$($attr.settings.query)".Trim() } else { '' }
+		if (-not $dlMain -and -not $dlQuery) {
+			Write-Host "[ERROR] Attribute '$($attr.name)': DynamicList requires settings.mainTable or settings.query — otherwise the form fails to open"
+			exit 1
+		}
+	}
 	foreach ($col in @($attr.columns)) { if ($null -ne $col) { Assert-OpKeys $col $script:colKeys "$ctx column '$($col.name)'" } }
 	foreach ($g in @($attr.additionalColumns)) {
 		if ($null -eq $g) { continue }
@@ -8516,10 +8583,6 @@ function Add-FormAttribute($attr, [int]$idx) {
 			Write-Host "[ERROR] Attribute '$($attr.name)' already exists in form — attribute names must be unique; to change it: { `"set`": `"$($attr.name)`", … }"
 			exit 1
 		}
-	}
-	if ((Test-IsDynamicListType "$($attr.type)") -and -not (Test-DynamicListSource $attr.settings)) {
-		Write-Host "[ERROR] Attribute '$($attr.name)': DynamicList requires settings.mainTable or settings.query — otherwise the form fails to open"
-		exit 1
 	}
 	if ($attr.main -eq $true) {
 		foreach ($m in $attrsSection.SelectNodes("f:Attribute/f:MainAttribute", $nsMgr)) {
@@ -9448,6 +9511,7 @@ $content = $content -replace '^<\?xml version="1.0" encoding="utf-8"\?>', '<?xml
 # Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 # CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 # поэтому они идут первыми ветками альтернации и возвращаются как есть.
+# Local (2026-09-14): processing instructions are protected as well — ` />` inside <?…?> is literal text.
 $content = [regex]::Replace($content, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 
 # BOM — как у файла-назначения: правка не меняет того, о чём не просили (#44/#46/#47).

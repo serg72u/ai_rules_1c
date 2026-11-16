@@ -1,6 +1,27 @@
 #!/usr/bin/env python3
-# form-compile v1.217 — Compile 1C managed form from JSON or object metadata
-# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# form-compile v1.224 — Compile 1C managed form from JSON or object metadata
+# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills, synced at
+#         2e75b0f483eb020e9f09562d1a7be1982bc5ac6e — the same upstream state the
+#         vendored form-compile.ps1 was synced from.
+# Licence: MIT, Copyright (c) 2025-2026 Nick Shirokov. Full notice and permission
+#          text: ../../../NOTICE.md (installed as
+#          skills/1c-metadata-manage/NOTICE.md).
+# Local: the event contract of the DSL is deterministic here, and the
+#        support guard reads `.dev.env` and fails closed. `events`, `on` +
+#        `handlers` and a standalone `handlers` map are one normalization with a
+#        single result (upstream drops a standalone `handlers` map silently); two
+#        spellings at once, a `handlers` key absent from `on` and an event name
+#        the platform does not have at all (in no element's event catalog — a
+#        misspelling such as `OnEndEdit`, or the obsolete `Drop`) are refused with
+#        exit 1 before any XML is written. Handler suffixes come from upstream's
+#        event catalog (`OnEditEnd` → `ПриОкончанииРедактирования`, `Selection` →
+#        `Выбор`, `DragEnd` → `ОкончаниеПеретаскивания`), the same table as in
+#        form-compile.ps1.
+#        From-object: a document choice form gets ChoiceMode like the catalog
+#        one, the document item preset writes AutoTime=CurrentOrLast /
+#        UsePostingMode=Auto / RepostOnWrite=true, and `Description` is bound
+#        only when DescriptionLength > 0. A missing Configuration.xml is reported
+#        instead of silently assuming 2.17.
 import argparse
 import copy
 import json
@@ -272,6 +293,9 @@ def assert_edit_allowed(target_path, require):
         parse_ok = False
         try:
             data = open(bin_path, "rb").read()
+            # A state of 32 bytes or less is the empty container left when vendor support was removed completely - nothing is on support, not 'unreadable'.
+            if len(data) <= 32:
+                parse_ok = True
             if len(data) > 32:
                 if data[:3] == b"\xef\xbb\xbf":
                     data = data[3:]
@@ -930,7 +954,7 @@ def generate_catalog_item_dsl(meta, p, fd):
     # BSP group
     bsp_group = (p.get('additional') or {}).get('bspGroup', True)
     if bsp_group:
-        root_elements.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b')]))
+        root_elements.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b'), ('showTitle', True)]))
 
     # Properties
     form_props = OrderedDict()
@@ -1147,7 +1171,7 @@ def generate_document_item_dsl(meta, p, fd):
         else:
             add_page_children.extend(add_left_els + add_right_els)
         if add_bsp_group:
-            add_page_children.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b')]))
+            add_page_children.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b'), ('showTitle', True)]))
         additional_page = OrderedDict([('page', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e'), ('title', '\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e'), ('children', add_page_children)])
 
     # Build TS page elements
@@ -1174,7 +1198,7 @@ def generate_document_item_dsl(meta, p, fd):
         if footer_elements:
             root_elements.extend(footer_elements)
         if add_bsp_group and add_pos != 'none':
-            root_elements.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b')]))
+            root_elements.append(OrderedDict([('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b'), ('showTitle', True)]))
     else:
         # Pages form
         if header_pos == 'abovePages':
@@ -1517,7 +1541,7 @@ def generate_chart_of_accounts_item_dsl(meta, p, fd, preset_data):
         for flag in meta['AccountingFlags']:
             flag_children.append(OrderedDict([('check', flag['Name']), ('path', f"\u041e\u0431\u044a\u0435\u043a\u0442.{flag['Name']}")]))
         elements.append(OrderedDict([
-            ('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438\u0423\u0447\u0435\u0442\u0430'), ('title', '\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438 \u0443\u0447\u0435\u0442\u0430'),
+            ('group', 'vertical'), ('name', '\u0413\u0440\u0443\u043f\u043f\u0430\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438\u0423\u0447\u0435\u0442\u0430'), ('showTitle', True), ('title', '\u041f\u0440\u0438\u0437\u043d\u0430\u043a\u0438 \u0443\u0447\u0435\u0442\u0430'),
             ('children', flag_children),
         ]))
 
@@ -1774,7 +1798,7 @@ def parse_filter_shorthand(s):
             elif re.match(r'^\d+(\.\d+)?$', val_part):
                 result['value'] = val_part
                 result['valueType'] = 'xs:decimal'
-            elif re.match(r'^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета)\.', val_part):
+            elif re.match(r'^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|ПланОбмена|Enum|Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|ExchangePlan)\.[^.]+\.[^.]+', val_part):
                 result['value'] = val_part
                 result['valueType'] = 'dcscor:DesignTimeValue'
             else:
@@ -1869,7 +1893,7 @@ def emit_filter_item(lines, item, indent):
         else:
             for v in val:
                 vt = _value_type_for(v, item.get('valueType'))
-                v_str = str(v).lower() if isinstance(v, bool) else esc_xml_text(str(v))
+                v_str = str(v).lower() if isinstance(v, bool) else esc_xml_text(normalize_design_time_value(v) if vt == 'dcscor:DesignTimeValue' else str(v))
                 ns_attr = _value_type_ns_attr(vt, v)
                 lines.append(f'{indent}\t<dcsset:right{ns_attr} xsi:type="{vt}">{v_str}</dcsset:right>')
     elif val is not None and (
@@ -1897,7 +1921,7 @@ def emit_filter_item(lines, item, indent):
         lines.append(f'{indent}\t<dcsset:right xsi:type="{vt}"/>')
     elif val is not None:
         vt = _value_type_for(val, item.get('valueType'))
-        v_str = str(val).lower() if isinstance(val, bool) else esc_xml_text(str(val))
+        v_str = str(val).lower() if isinstance(val, bool) else esc_xml_text(normalize_design_time_value(val) if vt == 'dcscor:DesignTimeValue' else str(val))
         ns_attr = _value_type_ns_attr(vt, val)
         lines.append(f'{indent}\t<dcsset:right{ns_attr} xsi:type="{vt}">{v_str}</dcsset:right>')
     if item.get('presentation'):
@@ -2750,6 +2774,29 @@ REF_ROOT_SYNONYMS = {
 ENUM_VALUE_SYNONYMS = {"EnumValue", "ЗначениеПеречисления"}
 
 
+# Значение ссылки в dcscor:DesignTimeValue (отборы, параметры) — к виду Конфигуратора:
+# "Enum.X.EnumValue.Y" / "Enum.X.Y" → "Перечисление.X.Y", "Catalog.X.EmptyRef" → "Справочник.X.ПустаяСсылка".
+# Вид с сегментом EnumValue платформа не разрешает: сравнение с ним всегда ложно (замер 8.3.24).
+DESIGN_TIME_REF_ROOTS = {
+    "Enum": "Перечисление", "Catalog": "Справочник", "Document": "Документ", "ChartOfAccounts": "ПланСчетов",
+    "ChartOfCharacteristicTypes": "ПланВидовХарактеристик", "ChartOfCalculationTypes": "ПланВидовРасчета",
+    "ExchangePlan": "ПланОбмена", "BusinessProcess": "БизнесПроцесс", "Task": "Задача",
+}
+
+
+def normalize_design_time_value(v):
+    parts = str(v).split('.')
+    if len(parts) < 3:
+        return str(v)
+    # Сравнения без учёта регистра — как в PS-порте (ключи хэш-таблицы, -contains)
+    parts[0] = next((v for k, v in DESIGN_TIME_REF_ROOTS.items() if k.lower() == parts[0].lower()), parts[0])
+    if parts[0] == 'Перечисление' and len(parts) >= 4 and parts[2].lower() in {x.lower() for x in ENUM_VALUE_SYNONYMS}:
+        parts = parts[:2] + parts[3:]
+    if parts[-1] == 'EmptyRef':
+        parts[-1] = 'ПустаяСсылка'
+    return '.'.join(parts)
+
+
 def normalize_meta_type_ref(ref):
     # "Справочник.Контрагенты" → "Catalog.Контрагенты"; уже англ — без изменений
     if not ref:
@@ -3092,9 +3139,30 @@ def get_element_name(el, type_key):
     return str(el.get(type_key, ''))
 
 
-# Собрать упорядоченный список событий элемента (имя, обработчик) из DSL.
-# Основной формат: el['events'] = { Событие: ИмяОбработчика } (None/"" → авто-имя по конвенции).
-# Legacy (принимается ради совместимости): el['on'] (массив) + el['handlers'] (переопределение имён).
+# Собрать упорядоченный список событий элемента (имя, обработчик, вид вызова) из DSL.
+#
+# Один нормализатор на все три формы записи — эмиттер и проверка по каталогу
+# (test_event_pairs) смотрят ровно на его результат, поэтому «событие подключено»
+# и «событие попало в XML» не могут разойтись:
+#
+#   * канонический    el['events']   = { Событие: ИмяОбработчика|null|{handler, callType}|[...] }
+#   * legacy-пара     el['on']       = [ Событие|{event, handler, callType}, ... ] + el['handlers'] = { Событие: Имя }
+#   * legacy-одиночный el['handlers'] = { Событие: Имя }   (без el['on'])
+#
+# null / "" в качестве имени — авто-имя по конвенции (get_handler_name).
+#
+# Local: upstream принимает только первые две формы, причём `handlers` без `on`
+# молча теряется — компиляция успешна, а события в форме нет. Ровно то же
+# молчание было при одновременном указании `events` и legacy-ключей. Здесь оба
+# случая — явный отказ до записи XML, потому что «успешно скомпилировано без
+# обработчика» обнаруживается только в Конфигураторе. Зеркало Get-EventPairs в PS.
+def _event_conflict(element_name, message, fix):
+    print(f"[ERROR] Конфликт описания событий у элемента '{element_name}': {message}",
+          file=sys.stderr)
+    print(f"        {fix}", file=sys.stderr)
+    sys.exit(1)
+
+
 def get_event_pairs(el, element_name, xml_tag=''):
     pairs = []
     events = el.get('events')
@@ -3108,18 +3176,6 @@ def get_event_pairs(el, element_name, xml_tag=''):
             f"одновременно заданы канонический ключ 'events' и legacy-ключ(и) '{legacy}'.",
             "Оставьте один формат: либо 'events': {Событие: ИмяОбработчика}, "
             "либо 'on' + 'handlers'.")
-
-    # Local: ключ в 'handlers', которого нет в 'on', — опечатка: обработчик не попал бы в форму,
-    # а ошибки бы не было. Апстрим такой ключ молча игнорирует.
-    if on and handlers:
-        on_names = [str(e.get('event')) if isinstance(e, dict) else str(e)
-                    for e in (on if isinstance(on, list) else [on])]
-        orphans = [str(k) for k in handlers if str(k) not in on_names]
-        if orphans:
-            _event_conflict(
-                element_name,
-                f"'handlers' переопределяет события, которых нет в 'on': {', '.join(orphans)}.",
-                "Добавьте их в 'on' или уберите из 'handlers'.")
 
     if events:
         for ev_name, val in events.items():
@@ -3135,9 +3191,18 @@ def get_event_pairs(el, element_name, xml_tag=''):
                 if not handler:
                     handler = get_handler_name(element_name, ev_name, xml_tag, call_type)
                 pairs.append((ev_name, handler, call_type))
-    elif el.get('on'):
-        handlers = el.get('handlers') or {}
-        for evt in (el['on'] if isinstance(el['on'], list) else [el['on']]):
+    elif on:
+        handlers = handlers or {}
+        on_list = on if isinstance(on, list) else [on]
+        on_names = [str(e.get('event', '')) if isinstance(e, dict) else str(e) for e in on_list]
+        unknown = [str(k) for k in handlers if str(k) not in on_names]
+        if unknown:
+            _event_conflict(
+                element_name,
+                f"'handlers' переопределяет события, которых нет в 'on': {', '.join(unknown)}.",
+                "Добавьте их в 'on' или уберите из 'handlers' — молча отбросить их нельзя, "
+                "это и есть опечатка, из-за которой обработчик не попадает в форму.")
+        for evt in on_list:
             if isinstance(evt, dict):
                 evt_name = str(evt.get('event', ''))
                 handler = '' if evt.get('handler') is None else str(evt.get('handler'))
@@ -3148,21 +3213,19 @@ def get_event_pairs(el, element_name, xml_tag=''):
                 handler = str(handlers[evt_name]) if handlers.get(evt_name) else get_handler_name(element_name, evt_name, xml_tag, call_type)
             pairs.append((evt_name, handler, call_type))
     elif handlers:
-        # Local: одиночная карта handlers без events/on — то же, что events: ключ это событие,
-        # значение — имя обработчика. Апстрим такую форму игнорирует, обработчик пропадал молча.
-        for evt_name, val in handlers.items():
-            pairs.append((str(evt_name), '' if val is None else str(val), ''))
-    # Local: событие вне каталога — отказ, а не предупреждение (паритет с PS-мастером,
-    # Test-EventPairs). Каталог собран по типовым конфигурациям, поэтому «нет в каталоге» —
-    # это опечатка; иначе она молча попадает в Form.xml и видна только в Конфигураторе.
-    for evt_name, _handler, _ct in pairs:
-        expected = EVENT_CATALOG.get(xml_tag)
-        if expected and not get_event_entry(xml_tag, evt_name):
-            known = ', '.join(sorted(expected))
-            print(f"[ERROR] Unknown event '{evt_name}' for {xml_tag} '{element_name}'. Known: {known}",
-                  file=sys.stderr)
-            sys.exit(1)
+        # Legacy-одиночный handlers: тот же смысл, что events.
+        for ev_name, val in handlers.items():
+            handler = '' if val is None else str(val)
+            if not handler:
+                handler = get_handler_name(element_name, str(ev_name), xml_tag, '')
+            pairs.append((str(ev_name), handler, ''))
     return pairs
+
+
+# Local: every event name of the catalog, whatever the element. An event outside it is
+# not a platform event at all (OnEndEdit for OnEditEnd, the obsolete Drop) and is refused
+# before Form.xml is written; an event of another element only gets upstream's [WARN].
+ALL_CATALOG_EVENTS = {ev for _tag_events in EVENT_CATALOG.values() for ev in _tag_events}
 
 
 # Вид вызова обработчика в расширении: Before / After / Override (регистр не важен); пусто — не указан.
@@ -3184,6 +3247,11 @@ def test_event_pairs(pairs, xml_tag, element_name, source=''):
     evs = EVENT_CATALOG.get(xml_tag)
     for ev, _, _ in pairs:
         ev = str(ev)
+        if ev not in ALL_CATALOG_EVENTS:
+            known = ', '.join(sorted(evs)) if evs else 'none'
+            print(f"[ERROR] Неизвестное событие '{ev}' для {what} — такого события нет у элементов "
+                  f"формы платформы. Известные: {known}", file=sys.stderr)
+            sys.exit(1)
         if not evs:
             print(f"[WARN] {what} has no events in standard configurations — the platform may drop '{ev}' on load")
             continue
@@ -5815,8 +5883,16 @@ def emit_group(lines, el, name, eid, indent):
         lines.append(f'{inner}<CurrentRowUse>{el["currentRowUse"]}</CurrentRowUse>')
 
     # ShowTitle
-    # ShowTitle=true — умолчание платформы (в корпусе только false): пишем лишь false
-    if el.get('showTitle') is not None and not el['showTitle']:
+    # Обычная группа без showTitle: заголовок показан, если он задан (title или titleDataPath), иначе скрыт — служебная группа
+    # раскладки без заголовка давала бы пустую строку-заголовок (умолчание платформы — показан).
+    # У сворачиваемой/всплывающей заголовок — переключатель: умолчание платформы, пишется лишь явный false.
+    if behavior_val in ('collapsible', 'popup'):
+        if el.get('showTitle') is not None and not el['showTitle']:
+            lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
+    elif el.get('showTitle') is not None:
+        if str(el['showTitle']).lower() != 'true':
+            lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
+    elif not el.get('title') and not el.get('titleDataPath'):
         lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
     # Заголовок свёрнутого представления (collapsible/popup) — мультиязычный текст
     if el.get('collapsedTitle'):
@@ -6955,14 +7031,14 @@ def emit_dl_value(lines, type_str, val, indent, value_list_allowed=False):
     elif re.match(r'^string', t):
         lines.append(f'{indent}<dcssch:value xsi:type="xs:string">{esc_xml_text(val_str)}</dcssch:value>')
     elif re.match(r'^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.', t):
-        lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(val_str)}</dcssch:value>')
+        lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val_str))}</dcssch:value>')
     else:
         if re.match(r'^\d{4}-\d{2}-\d{2}T', val_str):
             lines.append(f'{indent}<dcssch:value xsi:type="xs:dateTime">{esc_xml_text(val_str)}</dcssch:value>')
         elif val_str in ('true', 'false'):
             lines.append(f'{indent}<dcssch:value xsi:type="xs:boolean">{esc_xml_text(val_str)}</dcssch:value>')
         elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', val_str) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', val_str):
-            lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(val_str)}</dcssch:value>')
+            lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val_str))}</dcssch:value>')
         else:
             lines.append(f'{indent}<dcssch:value xsi:type="xs:string">{esc_xml_text(val_str)}</dcssch:value>')
 
@@ -7013,7 +7089,7 @@ def emit_dl_input_parameters(lines, ip, indent):
                         elif isinstance(v, (int, float)):
                             lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="xs:decimal">{v}</dcscor:value>')
                         else:
-                            lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(str(v))}</dcscor:value>')
+                            lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(v))}</dcscor:value>')
                     lines.append(f'{indent}\t\t\t</dcscor:item>')
                 lines.append(f'{indent}\t\t</dcscor:value>')
         elif 'choiceParameterLinks' in item:
@@ -7146,9 +7222,10 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             for v in val:
                 v_str = ('true' if v else 'false') if isinstance(v, bool) else str(v)
                 if re.match(r'^[a-zA-Z]+:', avtype):
-                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="{avtype}">{esc_xml_text(v_str)}</dcscor:value>')
+                    av_str = normalize_design_time_value(v_str) if avtype == 'dcscor:DesignTimeValue' else v_str
+                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="{avtype}">{esc_xml_text(av_str)}</dcscor:value>')
                 elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', v_str) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', v_str):
-                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(v_str)}</dcscor:value>')
+                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(v_str))}</dcscor:value>')
                 else:
                     lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(v_str)}</dcscor:value>')
         elif dp.get('nilValue') is True:
@@ -7191,7 +7268,7 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             elif re.match(r'^string', vtype):
                 lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(str(val))}</dcscor:value>')
             elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', str(val)) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', str(val)):
-                lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(str(val))}</dcscor:value>')
+                lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val))}</dcscor:value>')
             else:
                 lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(str(val))}</dcscor:value>')
         if dp.get('viewMode'):
@@ -7839,17 +7916,6 @@ def get_form_root_rank(tag):
     return order.index(tag)
 
 
-# Local: closed value sets of the platform enums behind these form properties
-# (FormWindowOpeningMode, AutoTimeMode, PostingModeUse). Upstream accepted any
-# string, and its spec listed values that do not exist (Modeless, Current,
-# Postings, Movements) — the Configurator refuses such a Form.xml on load.
-FORM_PROPERTY_VALUES = {
-    "windowOpeningMode": ("Independent", "LockOwnerWindow", "LockWholeInterface"),
-    "autoTime": ("DontUse", "First", "Last", "CurrentOrFirst", "CurrentOrLast"),
-    "usePostingMode": ("Auto", "RealTime", "Regular"),
-}
-
-
 def emit_properties(lines, props, indent):
     if not props:
         return
@@ -7863,11 +7929,6 @@ def emit_properties(lines, props, indent):
         # Пустая строка = суппресс-маркер (напр. autoTitle:"" — не эмитить и не додумывать)
         if isinstance(p_value, str) and p_value == '':
             continue
-        allowed = FORM_PROPERTY_VALUES.get(p_name)
-        if allowed is not None and str(p_value) not in allowed:
-            print(f"[ERROR] Недопустимое значение свойства формы '{p_name}': '{p_value}'. "
-                  f"Допустимые: {', '.join(allowed)}", file=sys.stderr)
-            sys.exit(1)
         # Convert boolean to lowercase
         if isinstance(p_value, bool):
             val = 'true' if p_value else 'false'
@@ -8565,13 +8626,6 @@ def main():
     # Events
     # Values as for elements; None — the conventional name (ПриСозданииНаСервере)
     if defn.get('events'):
-        # Local: событие формы вне каталога — отказ, а не тихий пропуск. Опечатка иначе
-        # попадает в Form.xml и всплывает только при открытии формы Конфигуратором.
-        for evt_name in defn['events']:
-            if not get_event_entry('Form', evt_name):
-                print(f"[ERROR] Неизвестное событие формы '{evt_name}' — его нет в каталоге событий.",
-                      file=sys.stderr)
-                sys.exit(1)
         for evt_name, val in defn['events'].items():
             if get_event_entry('Form', evt_name):
                 continue

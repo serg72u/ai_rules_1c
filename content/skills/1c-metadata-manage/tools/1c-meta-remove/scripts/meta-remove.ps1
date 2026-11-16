@@ -1,5 +1,8 @@
 ﻿# meta-remove v1.15 — Remove metadata object from 1C configuration dump
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: the support guard reads .dev.env SUPPORT_GUARD first (.v8-project.json
+# editingAllowedCheck is the fallback) and fails closed on an unreadable
+# Ext/ParentConfigurations.bin; other guard errors are reported on stderr.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
@@ -183,6 +186,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -339,7 +344,7 @@ function Save-XmlPreservingStyle {
 	# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 	# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 	# поэтому они идут первыми ветками альтернации и возвращаются как есть.
-	$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+	$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 	# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 	# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
 	$targetEol = if ((Test-Path -LiteralPath $path) -and ([System.IO.File]::ReadAllText($path) -notmatch "`r`n")) { "`n" } else { "`r`n" }
@@ -638,7 +643,7 @@ if (-not $cfgNode) {
 		# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 		# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 		# поэтому они идут первыми ветками альтернации и возвращаются как есть.
-		$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+		$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 		# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 		# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
 		$targetEol = if ((Test-Path -LiteralPath $registryXml) -and ([System.IO.File]::ReadAllText($registryXml) -notmatch "`r`n")) { "`n" } else { "`r`n" }
@@ -724,7 +729,7 @@ function Remove-FromSubsystems {
 			# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 			# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 			# поэтому они идут первыми ветками альтернации и возвращаются как есть.
-			$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+			$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 			# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 			# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
 			$targetEol = if ((Test-Path -LiteralPath $xmlFile.FullName) -and ([System.IO.File]::ReadAllText($xmlFile.FullName) -notmatch "`r`n")) { "`n" } else { "`r`n" }

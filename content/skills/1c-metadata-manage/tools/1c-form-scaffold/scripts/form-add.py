@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 # form-add v1.34 — Add managed form to 1C config object (Python port)
-# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Source: https://github.com/Nikolay-Shirokov/cc-1c-skills, synced at
+#         2e75b0f483eb020e9f09562d1a7be1982bc5ac6e — the same upstream state the
+#         vendored form-add.ps1 was synced from.
+# Licence: MIT, Copyright (c) 2025-2026 Nick Shirokov. Full notice and permission
+#          text: ../../../NOTICE.md (installed as
+#          skills/1c-metadata-manage/NOTICE.md).
+# Local: the support guard reads `.dev.env` `SUPPORT_GUARD` and fails
+#        closed on an unreadable support state, mirroring form-add.ps1.
+#        -FormName must be a 1C identifier (refused with exit 2 before any path
+#        or XPath is built from it); -FormName / -Synonym are XML-escaped in the
+#        descriptor. (The information register's record form names its main
+#        attribute "Запись" upstream too — Purpose=Record.)
 
 import argparse
 import json
@@ -171,6 +182,9 @@ def assert_edit_allowed(target_path, require):
         parse_ok = False
         try:
             data = open(bin_path, "rb").read()
+            # A state of 32 bytes or less is the empty container left when vendor support was removed completely - nothing is on support, not 'unreadable'.
+            if len(data) <= 32:
+                parse_ok = True
             if len(data) > 32:
                 if data[:3] == b"\xef\xbb\xbf":
                     data = data[3:]

@@ -1,5 +1,11 @@
 ﻿# db-load-cf v1.25 — Load 1C configuration from CF file
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local (1c-rules): .dev.env first — PLATFORM_PATH (an install dir resolves to bin\1cv8.exe) before
+#   the v8path of the .v8-project.json record / root, PLATFORM_ARGS / IBCMD_ARGS before v8args /
+#   ibcmdargs, the .dev.env directory is a project root for relative infobase paths;
+#   /ConfigurationRepositoryP is masked like /P.
+#   Every Designer launch passes /DumpResult and fails on a non-zero or missing result (Get-DumpResultError).
+#   Extension applicability check is opt-in (-ApplyCheck): /update1cbase Step 2c is the gate.
 # NB: *nix-раскладку платформы (/opt/1cv8/<ver>/1cv8, без .exe) знает только .py-порт — PS на *nix не исполняется.
 <#
 .SYNOPSIS
@@ -88,6 +94,11 @@ param(
     [Parameter(Mandatory=$false)]
     [switch]$NoApplyCheck,
 
+    # 1c-rules: проверить применимость расширения после загрузки. По умолчанию выключено — гейт
+    # применимости /update1cbase Step 2c; с ключом отказ платформы даёт код 1.
+    [Parameter(Mandatory=$false)]
+    [switch]$ApplyCheck,
+
     [Parameter(Mandatory=$false)]
     [string[]]$AdditionalV8Arguments = @(),
 
@@ -152,7 +163,7 @@ $script:IbcmdOwnedKeys = @(
     '--import', '--export', '--apply', '--force', '--create-database',
     '--user', '--password'
 )
-$script:V8SecretKeys = @('/P', '/UC', '/WSP', '/AWSP')
+$script:V8SecretKeys = @('/P', '/UC', '/WSP', '/AWSP', '/ConfigurationRepositoryP')
 $script:IbcmdSecretKeys = @('--password', '--token', '--db-pwd')
 
 function Test-ArgKeyMatch {
@@ -318,7 +329,8 @@ function Resolve-InfoBasePath {
         $base = $cwd
         $d = $cwd
         for ($i = 0; $i -lt 20 -and $d; $i++) {
-            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            # 1c-rules: the project root is the nearest directory with .dev.env or .v8-project.json.
+            if ((Test-Path -LiteralPath (Join-Path $d ".dev.env")) -or (Test-Path -LiteralPath (Join-Path $d ".v8-project.json"))) { $base = $d; break }
             $parent = [System.IO.Path]::GetDirectoryName($d)
             if ($parent -eq $d) { break }
             $d = $parent
@@ -407,8 +419,9 @@ function Find-ProjectDatabase {
 
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    # 1c-rules: .dev.env is this project's single source of truth — it wins over
-    # .v8-project.json, which stays supported as the upstream fallback below.
+    # 1c-rules: -V8Path (caller) -> .dev.env PLATFORM_PATH -> v8path of the matching .v8-project.json
+    # database record -> root v8path -> auto-detect. .dev.env is this project's single source of
+    # truth; .v8-project.json stays supported as the upstream fallback below.
     $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
     if (Test-Path $__devEnvHelper) {
         . $__devEnvHelper
@@ -707,6 +720,22 @@ function Write-PlatformOutput {
     Write-Host "--- End ---"
 }
 
+# 1c-rules: batch verdict. /DumpResult receives the result of the batch command (0 = success).
+# Read it before trusting exit code 0: a batch command can fail while 1cv8 exits 0, and a missing
+# file means the command never completed (content/rules/designer-batch-checks.md -> The verdict is
+# three signals). Returns '' on success, otherwise the reason to report.
+function Get-DumpResultError {
+    param([string]$ResultFile)
+    $code = ''
+    if ($ResultFile -and (Test-Path -LiteralPath $ResultFile)) {
+        $text = Get-Content -LiteralPath $ResultFile -Raw -ErrorAction SilentlyContinue
+        if ($text) { $code = ($text -replace '[^\d\-]', '') }
+    }
+    if ($code -eq '0') { return '' }
+    if ($code) { return "batch result $code reported by /DumpResult (0 = success)" }
+    return "/DumpResult wrote no result - the batch command did not complete"
+}
+
 
 # Постусловие применимости расширения: платформа отчитывается успехом и о расширении, которое
 # не применит — отказ всплывает лениво, при первом вызове метода, записью в журнал регистрации.
@@ -722,14 +751,15 @@ function Invoke-ApplyCheck {
     $exeDir = Split-Path $Exe -Parent
     $exeLeaf = Split-Path $Exe -Leaf
     $v8 = if ($exeLeaf -match '^ibcmd') { Join-Path $exeDir ("1cv8" + [System.IO.Path]::GetExtension($Exe)) } else { $Exe }
-    if (-not (Test-Path $v8)) { return @{ Skipped = $true; Reason = "1cv8 not found at $v8"; ExitCode = 0; Lines = @() } }
+    if (-not (Test-Path $v8)) { return @{ Skipped = $true; Reason = "1cv8 not found at $v8"; ExitCode = 0; Lines = @(); DumpError = '' } }
     $dir = Join-Path ([IO.Path]::GetTempPath()) "apply_check_$(Get-Random)"
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     try {
         $a = @("DESIGNER") + $ConnArgs + @("/CheckCanApplyConfigurationExtensions")
         if ($Extension) { $a += "-Extension", "`"$Extension`"" }
         $outFile = Join-Path $dir "check_log.txt"
-        $a += "/Out", "`"$outFile`"", "/DisableStartupDialogs"
+        $resultFile = Join-Path $dir "check_result.txt"
+        $a += "/Out", "`"$outFile`"", "/DumpResult", "`"$resultFile`"", "/DisableStartupDialogs"
         $a += $ExtraArgs
         $res = Invoke-PlatformProcess $v8 $a -PreQuoted
         $lines = @()
@@ -737,7 +767,7 @@ function Invoke-ApplyCheck {
             $raw = Get-Content $outFile -Raw -ErrorAction SilentlyContinue
             if ($raw) { $lines = @($raw -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }
         }
-        return @{ Skipped = $false; Reason = ''; ExitCode = $res.ExitCode; Lines = $lines }
+        return @{ Skipped = $false; Reason = ''; ExitCode = $res.ExitCode; Lines = $lines; DumpError = (Get-DumpResultError $resultFile) }
     } finally {
         if ($dir -and (Test-Path $dir)) { Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
@@ -752,18 +782,23 @@ function Invoke-ApplyCheckReport {
         Write-Host "[note] applicability check skipped: $($ac.Reason)" -ForegroundColor Yellow
         return $false
     }
-    if ($ac.ExitCode -ne 0 -or $ac.Lines.Count -gt 0) {
+    if ($ac.ExitCode -ne 0 -or $ac.Lines.Count -gt 0 -or $ac.DumpError) {
         Write-Host "[warning] the extension is loaded, but the platform will not apply it:" -ForegroundColor Yellow
         foreach ($l in $ac.Lines) { Write-Host "  $l" -ForegroundColor Yellow }
+        if ($ac.DumpError -and $ac.Lines.Count -eq 0) { Write-Host "  $($ac.DumpError)" -ForegroundColor Yellow }
         return $true
     }
     return $false
 }
 
 # Проверять ли применимость: -NoApplyCheck сильнее настройки проекта.
+# 1c-rules: off by default. /update1cbase Step 2c runs the applicability gate (/CheckModules, then
+# /CheckCanApplyConfigurationExtensions) between load and update; a second Designer pass from the
+# loader would only double it. -ApplyCheck or .v8-project.json extensionApplyCheck=true turn it on.
 function Get-ApplyCheckEnabled {
-    param([switch]$Disabled)
+    param([switch]$Disabled, [switch]$Requested)
     if ($Disabled) { return $false }
+    if ($Requested) { return $true }
     $pf = Find-V8Project (Get-Location).ProviderPath
     if ($pf) {
         try {
@@ -771,7 +806,7 @@ function Get-ApplyCheckEnabled {
             if ($null -ne $proj.extensionApplyCheck) { return [bool]$proj.extensionApplyCheck }
         } catch {}
     }
-    return $true
+    return $false
 }
 
 
@@ -826,11 +861,11 @@ try {
             Write-Host "Error loading configuration (code: $exitCode)$(Get-ExitAnnotation $exitCode)" -ForegroundColor Red
         }
         # Проверку применимости умеет только 1cv8 — соединение для неё собираем в его форме.
-        if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck)) {
+        if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck -Requested:$ApplyCheck)) {
             $acConn = @("/F", "`"$InfoBasePath`"")
             if ($UserName) { $acConn += "/N`"$UserName`"" }
             if ($Password) { $acConn += "/P`"$Password`"" }
-            if ((Invoke-ApplyCheckReport $V8Path $acConn $Extension @()) -and $StrictLog) { $exitCode = 1 }
+            if ((Invoke-ApplyCheckReport $V8Path $acConn $Extension @()) -and ($StrictLog -or $ApplyCheck)) { $exitCode = 1 }
         }
         Write-PlatformOutput $output
         exit $exitCode
@@ -864,6 +899,7 @@ try {
     # --- Output ---
     $outFile = Join-Path $tempDir "load_cf_log.txt"
     $arguments += "/Out", "`"$outFile`""
+    # 1c-rules: /DumpResult beside /Out - the batch verdict, read right after the launch.
     $resultFile = Join-Path $tempDir "batch_result.txt"
     $arguments += "/DumpResult", "`"$resultFile`""
     $arguments += "/DisableStartupDialogs"
@@ -873,24 +909,9 @@ try {
     Write-Host "Running: 1cv8.exe $(Protect-Secrets ((Format-ArgsForDisplay $arguments $engine) -join ' ') @($Password, $UserName))"
     $__v8 = Invoke-PlatformProcess $V8Path $arguments -PreQuoted
     $exitCode = $__v8.ExitCode
-
-    # The platform's own batch verdict: /DumpResult writes 0 on success. Read it before
-    # trusting the exit code - a batch command can fail while 1cv8 exits 0 (canon:
-    # content/rules/designer-batch-checks.md -> The verdict is three signals).
     if ($exitCode -eq 0) {
-        $dumpCode = ''
-        if (Test-Path -LiteralPath $resultFile) {
-            $dumpText = Get-Content -LiteralPath $resultFile -Raw -ErrorAction SilentlyContinue
-            if ($dumpText) { $dumpCode = ($dumpText -replace '[^\d\-]', '') }
-        }
-        if ($dumpCode -ne '0') {
-            if ($dumpCode) {
-                Write-Host "[error] batch result $dumpCode reported by /DumpResult (0 = success)" -ForegroundColor Red
-            } else {
-                Write-Host "[error] /DumpResult wrote no result - the batch command did not complete" -ForegroundColor Red
-            }
-            $exitCode = 1
-        }
+        $__dumpError = Get-DumpResultError $resultFile
+        if ($__dumpError) { Write-Host "[error] $__dumpError" -ForegroundColor Red; $exitCode = 1 }
     }
 
     # --- Result ---
@@ -911,8 +932,8 @@ try {
     Write-PlatformOutput $__v8.Output
 
     # Расширение могло загрузиться «успешно» и остаться неприменимым — спрашиваем платформу.
-    if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck)) {
-        if ((Invoke-ApplyCheckReport $V8Path $connArgs $Extension $extraArgs) -and $StrictLog) { $exitCode = 1 }
+    if ($exitCode -eq 0 -and ($Extension -or $AllExtensions) -and (Get-ApplyCheckEnabled -Disabled:$NoApplyCheck -Requested:$ApplyCheck)) {
+        if ((Invoke-ApplyCheckReport $V8Path $connArgs $Extension $extraArgs) -and ($StrictLog -or $ApplyCheck)) { $exitCode = 1 }
     }
 
     exit $exitCode

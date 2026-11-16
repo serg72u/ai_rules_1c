@@ -1,5 +1,7 @@
-﻿# skd-validate v1.8 — Validate 1C DCS structure
+﻿# skd-validate v1.9 — Validate 1C DCS structure
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: the XSD directory comes from .dev.env V8_XSD_PATH first (.v8-project.json xsdPath is the
+#   fallback, then .v8-xsd next to .dev.env); a missing directory is named in the "XSD not checked" note.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory, Position=0)]
@@ -94,6 +96,7 @@ $finalize = {
 	} else {
 		Out-Line ""
 		$note = if ($script:xsdNote) { "; $($script:xsdNote)" } else { "" }
+		if ($script:stopped -and $script:errors -ge $MaxErrors) { Out-Line "Stopped after $MaxErrors errors. Fix and re-run." }
 		Out-Line "=== Result: $($script:errors) errors, $($script:warnings) warnings ($checks checks$note) ==="
 		$result = $script:output.ToString()
 	}
@@ -1027,20 +1030,45 @@ function Test-XsdVersionDir([string]$dir) {
 	return $false
 }
 
-# Каталог схем: .v8-project.json — сначала от шаблона (проект, которому он принадлежит), потом
-# от текущего каталога; xsdPath из него, иначе .v8-xsd рядом с ним. Нет проекта — нет схем.
-function Resolve-XsdRoot([string]$templateDir) {
+# Local: каталог схем — сначала ключ V8_XSD_PATH из .dev.env (относительный путь — от каталога
+# .dev.env); без ключа — xsdPath из .v8-project.json, как в апстриме (сначала от шаблона, потом от
+# текущего каталога); иначе .v8-xsd рядом с .dev.env, потом рядом с .v8-project.json. Нет ни
+# того, ни другого — нет схем. Тот же порядок скопирован в v8-xsd-fetch.
+function Get-XsdRootCandidate([string]$templateDir) {
+	$envDir = $null
+	$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+	if (Test-Path -LiteralPath $__devEnvHelper) {
+		. $__devEnvHelper
+		$envFile = Find-1CDevEnvFile
+		if ($envFile) {
+			$envDir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($envFile))
+			$v = Get-1CDevEnvValue 'V8_XSD_PATH'
+			if ($v) {
+				$p = if ([System.IO.Path]::IsPathRooted($v)) { $v } else { Join-Path $envDir $v }
+				return [System.IO.Path]::GetFullPath($p)
+			}
+		}
+	}
 	$pj = Find-V8Project $templateDir
 	if (-not $pj) { $pj = Find-V8Project (Get-Location).ProviderPath }
-	if (-not $pj) { return $null }
-	$pjDir = [System.IO.Path]::GetDirectoryName($pj)
-	$rel = ".v8-xsd"
-	try {
-		$cfg = Get-Content -LiteralPath $pj -Raw -Encoding UTF8 | ConvertFrom-Json
-		if ($cfg.xsdPath) { $rel = "$($cfg.xsdPath)" }
-	} catch {}
-	$dir = if ([System.IO.Path]::IsPathRooted($rel)) { $rel } else { Join-Path $pjDir $rel }
-	if (Test-Path -LiteralPath $dir -PathType Container) { return $dir }
+	$pjDir = if ($pj) { [System.IO.Path]::GetDirectoryName($pj) } else { $null }
+	if ($pj) {
+		try {
+			$cfg = Get-Content -LiteralPath $pj -Raw -Encoding UTF8 | ConvertFrom-Json
+			if ($cfg.xsdPath) {
+				$rel = "$($cfg.xsdPath)"
+				$p = if ([System.IO.Path]::IsPathRooted($rel)) { $rel } else { Join-Path $pjDir $rel }
+				return [System.IO.Path]::GetFullPath($p)
+			}
+		} catch {}
+	}
+	if ($envDir) { return (Join-Path $envDir ".v8-xsd") }
+	if ($pjDir) { return (Join-Path $pjDir ".v8-xsd") }
+	return $null
+}
+function Resolve-XsdRoot([string]$templateDir) {
+	$dir = Get-XsdRootCandidate $templateDir
+	if ($dir -and (Test-Path -LiteralPath $dir -PathType Container)) { return $dir }
 	return $null
 }
 
@@ -1205,7 +1233,12 @@ function Compress-XsdMessage([string]$m) {
 
 function Invoke-XsdCheck {
 	$xsdRoot = Resolve-XsdRoot ([System.IO.Path]::GetDirectoryName($resolvedPath))
-	if (-not $xsdRoot) { $script:xsdNote = "XSD not checked: no schemas (/v8-xsd-fetch)"; return }
+	if (-not $xsdRoot) {
+		$cand = Get-XsdRootCandidate ([System.IO.Path]::GetDirectoryName($resolvedPath))
+		$where = if ($cand) { " in '$cand'" } else { "" }
+		$script:xsdNote = "XSD not checked: no schemas$where (v8-xsd-fetch)"
+		return
+	}
 	$anchor = Find-DumpAnchor ([System.IO.Path]::GetDirectoryName($resolvedPath))
 	$ver = if ($anchor) { Get-RootVersion $anchor } else { $null }
 	if (-not $ver -or (Get-FormatRank $ver) -eq 0) { $script:xsdNote = "XSD not checked: template outside a dump"; return }

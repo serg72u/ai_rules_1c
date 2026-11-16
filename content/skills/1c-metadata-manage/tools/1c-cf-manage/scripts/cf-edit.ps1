@@ -1,7 +1,8 @@
-﻿# cf-edit v1.31 — Edit 1C configuration root (Configuration.xml)
+﻿# cf-edit v1.33 — Edit 1C configuration root (Configuration.xml)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
-# Local: add-childObject places a new entry by NEW_OBJECT_POSITION (end by default, as Configurator).
-[CmdletBinding(PositionalBinding=$false)]
+# Local: .dev.env first: SUPPORT_GUARD (support guard, fail-closed on an unreadable bin) and
+#   NEW_OBJECT_POSITION (add-childObject: end by default, byName on request) win over .v8-project.json.
+# Local: cf-validate is the sibling in this scripts dir; a missing validator or its non-zero exit is the exit code.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)][Alias('Path')][string]$ConfigPath,
@@ -19,14 +20,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -39,7 +49,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	Write-Output -NoEnumerate $parsed
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -134,9 +144,6 @@ function Find-V8Project([string]$startDir) {
 	}
 	return $null
 }
-# Edit permission: the trigger is Ext/ParentConfigurations.bin next to Configuration.xml (vendor
-# support). Reaction comes from .dev.env SUPPORT_GUARD (deny|warn|off, default deny); with the key
-# absent the upstream .v8-project.json editingAllowedCheck is used.
 function Get-EditMode([string]$cfgDir) {
 	try {
 		# 1c-rules: .dev.env SUPPORT_GUARD wins over .v8-project.json editingAllowedCheck.
@@ -146,8 +153,6 @@ function Get-EditMode([string]$cfgDir) {
 		    $__devEnvMode = (Get-1CDevEnvValue 'SUPPORT_GUARD').ToLower()
 		    if (@('deny', 'warn', 'off') -contains $__devEnvMode) { return $__devEnvMode }
 		}
-		$pj = Find-V8Project (Get-Location).ProviderPath
-		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return 'deny' }
@@ -200,6 +205,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -496,6 +503,7 @@ function Do-ModifyProperty([string]$batchVal) {
 
 # --- Operation: add-childObject ---
 # Куда навык ставит новую запись в <ChildObjects> — настройка newObjectPosition.
+# 1c-rules: сначала NEW_OBJECT_POSITION из .dev.env, .v8-project.json — запасной путь.
 # databases[].newObjectPosition базы, чей configSrc охватывает каталог родительского XML,
 # иначе корневое поле, иначе end. Значения: end — после последнего объекта того же вида
 # (так дописывает Конфигуратор); byName — по имени среди объектов того же вида.
@@ -504,13 +512,10 @@ function Do-ModifyProperty([string]$batchVal) {
 # остаётся рабочим каталогом проекта.
 # configSrc считается от каталога .v8-project.json, как задокументировано в
 # docs/v8-project-guide.md. Реестр семьи: tests/skills/check-inline-drift.mjs.
-# Where a new <ChildObjects> entry goes inside its kind group: NEW_OBJECT_POSITION, resolved as in
-# meta-compile. end (default) — after the last object of the kind, as Configurator does; byName — by
-# name (APK:1108). .dev.env decides whenever the key is set (an unrecognised value means end); with the
-# key absent the upstream .v8-project.json newObjectPosition is used.
 function Get-NewObjectPosition([string]$cfgDir) {
 	try {
 		if (-not $cfgDir) { $cfgDir = "." }
+		# 1c-rules: .dev.env NEW_OBJECT_POSITION decides when the key is set (an unknown value = end).
 		$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
 		if (Test-Path $__devEnvHelper) {
 		    . $__devEnvHelper
@@ -734,7 +739,6 @@ function Do-AddChildObject([string]$batchVal) {
 		Expand-SelfClosingElement $script:childObjsEl $cfgIndent
 	}
 	$childIndent = Get-ChildIndent $script:childObjsEl
-	$position = Get-NewObjectPosition $script:configDir
 
 	foreach ($item in $items) {
 		$dotIdx = $item.IndexOf(".")

@@ -1,5 +1,11 @@
 ﻿# db-dump-xml v1.29 — Dump 1C configuration to XML files
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local (1c-rules): .dev.env first — PLATFORM_PATH (an install dir resolves to bin\1cv8.exe) before
+#   the v8path of the .v8-project.json record / root, PLATFORM_ARGS / IBCMD_ARGS before v8args /
+#   ibcmdargs, the .dev.env directory is a project root for relative infobase paths;
+#   /ConfigurationRepositoryP is masked like /P.
+#   Every Designer launch passes /DumpResult and fails on a non-zero or missing result (Get-DumpResultError).
+#   Repository credentials: .dev.env REPOSITORY_* before the registry record (main configuration only).
 # NB: *nix-раскладку платформы (/opt/1cv8/<ver>/1cv8, без .exe) знает только .py-порт — PS на *nix не исполняется.
 <#
 .SYNOPSIS
@@ -194,6 +200,23 @@ function Resolve-RepositorySettings {
             $rec = $dbRec.repository
         }
     }
+    # 1c-rules: .dev.env REPOSITORY_PATH / REPOSITORY_USER / REPOSITORY_PASSWORD (the repository of
+    # the main configuration) win over the registry record; explicit -Repository* still win over
+    # both. An extension's own repository is described only by the registry (extensions[].repository).
+    if (-not $Extension) {
+        $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+        if (Test-Path $__devEnvHelper) {
+            . $__devEnvHelper
+            $__devEnvRepo = Get-1CDevEnvValue 'REPOSITORY_PATH'
+            if ($__devEnvRepo) {
+                $rec = [pscustomobject]@{
+                    path     = $__devEnvRepo
+                    user     = (Get-1CDevEnvValue 'REPOSITORY_USER')
+                    password = (Get-1CDevEnvValue 'REPOSITORY_PASSWORD')
+                }
+            }
+        }
+    }
     $path = if ($RepositoryPath) { $RepositoryPath } elseif ($rec -and $rec.path) { [string]$rec.path } else { $null }
     $user = if ($RepositoryUser) { $RepositoryUser } elseif ($rec -and $rec.user) { [string]$rec.user } else { $null }
     # Пустой пароль = отсутствующий: 1С требует опускать ключ целиком, а не передавать пустое значение.
@@ -275,7 +298,6 @@ function Get-ProjectExtraArgs {
         $__devEnvArgs = @(Get-1CDevEnvArgs $__devEnvKey)
         if ($__devEnvArgs.Count -gt 0) { return $__devEnvArgs }
     }
-    $dir = (Get-Location).ProviderPath
     $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
@@ -417,7 +439,8 @@ function Resolve-InfoBasePath {
         $base = $cwd
         $d = $cwd
         for ($i = 0; $i -lt 20 -and $d; $i++) {
-            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            # 1c-rules: the project root is the nearest directory with .dev.env or .v8-project.json.
+            if ((Test-Path -LiteralPath (Join-Path $d ".dev.env")) -or (Test-Path -LiteralPath (Join-Path $d ".v8-project.json"))) { $base = $d; break }
             $parent = [System.IO.Path]::GetDirectoryName($d)
             if ($parent -eq $d) { break }
             $d = $parent
@@ -463,19 +486,15 @@ Assert-InfoBaseExists $InfoBasePath
 
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    # 1c-rules: .dev.env is this project's single source of truth — it wins over
-    # .v8-project.json, which stays supported as the upstream fallback below.
+    # 1c-rules: -V8Path (caller) -> .dev.env PLATFORM_PATH -> v8path of the matching .v8-project.json
+    # database record -> root v8path -> auto-detect. .dev.env is this project's single source of
+    # truth; .v8-project.json stays supported as the upstream fallback below.
     $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
     if (Test-Path $__devEnvHelper) {
         . $__devEnvHelper
         $__devEnvV8 = Get-1CDevEnvValue 'PLATFORM_PATH'
         if ($__devEnvV8) { return $__devEnvV8 }
     }
-    # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
-    # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
-    $dbRec = Find-ProjectDatabase
-    if ($dbRec -and $dbRec.v8path) { return [string]$dbRec.v8path }
-    $dir = (Get-Location).ProviderPath
     # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
     # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
     $dbRec = Find-ProjectDatabase
@@ -768,6 +787,22 @@ function Write-PlatformOutput {
     Write-Host "--- End ---"
 }
 
+# 1c-rules: batch verdict. /DumpResult receives the result of the batch command (0 = success).
+# Read it before trusting exit code 0: a batch command can fail while 1cv8 exits 0, and a missing
+# file means the command never completed (content/rules/designer-batch-checks.md -> The verdict is
+# three signals). Returns '' on success, otherwise the reason to report.
+function Get-DumpResultError {
+    param([string]$ResultFile)
+    $code = ''
+    if ($ResultFile -and (Test-Path -LiteralPath $ResultFile)) {
+        $text = Get-Content -LiteralPath $ResultFile -Raw -ErrorAction SilentlyContinue
+        if ($text) { $code = ($text -replace '[^\d\-]', '') }
+    }
+    if ($code -eq '0') { return '' }
+    if ($code) { return "batch result $code reported by /DumpResult (0 = success)" }
+    return "/DumpResult wrote no result - the batch command did not complete"
+}
+
 
 function Test-DirNonEmpty {
     # Postcondition: the platform must have written files into the output directory.
@@ -1003,6 +1038,7 @@ try {
     # --- Output ---
     $outFile = Join-Path $tempDir "dump_log.txt"
     $arguments += "/Out", "`"$outFile`""
+    # 1c-rules: /DumpResult beside /Out - the batch verdict, read right after the launch.
     $resultFile = Join-Path $tempDir "batch_result.txt"
     $arguments += "/DumpResult", "`"$resultFile`""
     $arguments += "/DisableStartupDialogs"
@@ -1012,24 +1048,9 @@ try {
     Write-Host "Running: 1cv8.exe $(Protect-Secrets ((Format-ArgsForDisplay $arguments $engine) -join ' ') @($Password, $UserName, $__repo.Password))"
     $__v8 = Invoke-PlatformProcess $V8Path $arguments -PreQuoted
     $exitCode = $__v8.ExitCode
-
-    # The platform's own batch verdict: /DumpResult writes 0 on success. Read it before
-    # trusting the exit code - a batch command can fail while 1cv8 exits 0 (canon:
-    # content/rules/designer-batch-checks.md -> The verdict is three signals).
     if ($exitCode -eq 0) {
-        $dumpCode = ''
-        if (Test-Path -LiteralPath $resultFile) {
-            $dumpText = Get-Content -LiteralPath $resultFile -Raw -ErrorAction SilentlyContinue
-            if ($dumpText) { $dumpCode = ($dumpText -replace '[^\d\-]', '') }
-        }
-        if ($dumpCode -ne '0') {
-            if ($dumpCode) {
-                Write-Host "[error] batch result $dumpCode reported by /DumpResult (0 = success)" -ForegroundColor Red
-            } else {
-                Write-Host "[error] /DumpResult wrote no result - the batch command did not complete" -ForegroundColor Red
-            }
-            $exitCode = 1
-        }
+        $__dumpError = Get-DumpResultError $resultFile
+        if ($__dumpError) { Write-Host "[error] $__dumpError" -ForegroundColor Red; $exitCode = 1 }
     }
 
     # --- Result ---

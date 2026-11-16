@@ -1,5 +1,9 @@
-﻿# role-edit v1.9 — Edit existing 1C role rights in place
+﻿# role-edit v1.11 — Edit existing 1C role rights in place
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: support guard reads .dev.env SUPPORT_GUARD first and fails closed on an unreadable
+# support state; the sibling role-validate is ..\..\1c-role-validate\scripts in this layout,
+# its absence is refused before any write (-NoValidate is the only opt-out) and its exit
+# code is the run's result. Rights tables are kept identical to role-compile.ps1.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)][Alias('Path','RightsPath')][string]$RolePath,
@@ -19,7 +23,15 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -32,10 +44,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	# PS 7 wraps a NON-array in a List<object> for -NoEnumerate, so the caller's
-	# $def.PSObject.Properties would list List members (Capacity, Count, …) instead of the
-	# JSON keys and every operation would be 'unknown'. Only arrays need the switch.
-	if ($parsed -is [System.Array]) { Write-Output -NoEnumerate $parsed } else { return $parsed }
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -75,10 +84,12 @@ function Read-JsonInputFile([string]$path) {
 }
 
 # --- Support guard (Ext/ParentConfigurations.bin) ---
-# See docs/1c-support-state-spec.md. Blocks edits of vendor objects "на замке" /
+# Canon: docs/support-manage.md. Blocks edits of vendor objects "на замке" /
 # read-only configs unless allowed. Trigger = bin present; reaction from
-# .v8-project.json editingAllowedCheck (deny|warn|off, default deny). Never
-# throws — guard errors degrade to allow.
+# .dev.env SUPPORT_GUARD (deny|warn|off, default deny; .v8-project.json
+# editingAllowedCheck stays as the upstream fallback). Fail-closed on an
+# unreadable support state (bin exists but cannot be parsed — same reaction);
+# other guard errors degrade to allow with a stderr notice.
 function Get-RootUuid([string]$xmlPath) {
 	if (-not (Test-Path $xmlPath)) { return $null }
 	try {
@@ -166,15 +177,33 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		# New object (no element file): fall back to config root uuid.
 		if (-not $elemUuid -and $cfgDir) { $elemUuid = Get-RootUuid (Join-Path $cfgDir "Configuration.xml") }
 		if (-not $binPath -or -not (Test-Path $binPath)) { return }
-		$bytes = [System.IO.File]::ReadAllBytes($binPath)
-		if ($bytes.Length -le 32) { return }
-		$start = 0
-		if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
-		$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
-		$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
-		if (-not $hm.Success) { return }
-		$G = [int]$hm.Groups[1].Value
-		$K = [int]$hm.Groups[2].Value
+		# Bin present: an unreadable / unparseable support state must not silently
+		# degrade to allow — fail closed via the SUPPORT_GUARD reaction instead.
+		$G = 0; $K = 0; $text = $null; $parseOk = $false
+		try {
+			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
+			if ($bytes.Length -gt 32) {
+				$start = 0
+				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+				$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
+				$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
+				if ($hm.Success) {
+					$G = [int]$hm.Groups[1].Value
+					$K = [int]$hm.Groups[2].Value
+					$parseOk = $true
+				}
+			}
+		} catch {}
+		if (-not $parseOk) {
+			$mode = Get-EditMode $cfgDir
+			if ($mode -eq 'off') { return }
+			$msg = "[support-guard] Файл состояния поддержки «$binPath» существует, но не читается или не разбирается — состояние объекта неизвестно, он может быть на замке."
+			if ($mode -eq 'warn') { [Console]::Error.WriteLine("$msg Продолжаю по SUPPORT_GUARD=warn."); return }
+			[Console]::Error.WriteLine("$msg`nРедактирование остановлено (fail-closed). Проверьте целостность выгрузки, либо задайте SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md).")
+			exit 1
+		}
 		if ($K -eq 0) { return }
 		$best = $null
 		if ($elemUuid) {
@@ -200,7 +229,7 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		if ($mode -eq 'warn') { [Console]::Error.WriteLine("[support-guard] ПРЕДУПРЕЖДЕНИЕ: $reason. Цель: $rp"); return }
 		$head = "[support-guard] Редактирование отклонено: это объект типовой конфигурации на поддержке поставщика, прямое редактирование молча сломает будущие обновления."
 		$cfe = "Рекомендуемый путь: внести доработку в расширение (навыки cfe-borrow / cfe-patch-method) — состояние поддержки менять не нужно, обновления вендора сохраняются."
-		$offNote = "Снять проверку для этой базы: editingAllowedCheck = warn|off в .v8-project.json."
+		$offNote = "Снять проверку: SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md)."
 		if ($code -eq "capability-off") {
 			$state = "Состояние: у всей конфигурации выключена возможность изменения (режим read-only «из коробки») — поэтому объект «$rp» редактировать нельзя."
 			$fix = "Либо снять защиту явно (навык support-edit, два шага):`n  1. support-edit -Path ""$cfgDir"" -Capability on — включить возможность изменения (объекты пока остаются на замке);`n  2. support-edit -Path ""$rp"" -Set editable — открыть этот объект для редактирования.`n  Изменение применяется в базу полной загрузкой выгрузки и обходит механизм обновлений вендора."
@@ -213,7 +242,10 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		}
 		[Console]::Error.WriteLine("$head`n$state`n$cfe`n$fix`n$offNote")
 		exit 1
-	} catch { return }
+	} catch {
+		[Console]::Error.WriteLine("[support-guard] Проверка состояния поддержки не выполнена ($($_.Exception.Message)) — продолжаю без блокировки.")
+		return
+	}
 }
 
 # --- 3. Russian synonyms → canonical English names ---
@@ -1434,7 +1466,8 @@ function Finalize-XmlText([string]$text, $style) {
 	# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 	# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 	# поэтому они идут первыми ветками альтернации и возвращаются как есть.
-	$text = [regex]::Replace($text, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+	# Local: processing instructions are kept verbatim too, as in skd-edit / cf-edit.
+	$text = [regex]::Replace($text, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 	$text = ($text -replace "`r`n", "`n").TrimEnd("`n")
 	if ($style -and $style.finalNl) { $text += "`n" }
 	if (-not $style -or $style.crlf) { $text = $text -replace "`n", "`r`n" }
@@ -1525,6 +1558,15 @@ $script:textBaseDir = if ($DefinitionFile) { [System.IO.Path]::GetDirectoryName(
 
 $targetForGuard = if (Test-Path -LiteralPath $script:roleXmlPath) { $script:roleXmlPath } else { $script:rightsPath }
 Assert-EditAllowed $targetForGuard 'editable'
+
+# Local: the mandatory auto-validator has to exist before the edit, not after it. Upstream
+# looks for ..\..\role-validate\scripts — a path this layout does not have — and skipped the
+# check silently. A missing validator is a refusal; -NoValidate is the explicit opt-out.
+$script:validateScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\1c-role-validate\scripts\role-validate.ps1'))
+if (-not $NoValidate -and -not (Test-Path -LiteralPath $script:validateScript)) {
+	[Console]::Error.WriteLine("[ERROR] Обязательная автопроверка не может быть выполнена: role-validate не найден по пути $($script:validateScript). Роль не изменена; -NoValidate отключает проверку явно.")
+	exit 1
+}
 
 # --- Загрузка XML ---
 $script:xmlDoc = New-Object System.Xml.XmlDocument
@@ -2417,18 +2459,17 @@ if ($script:droppedByDefault.Count -gt 0) {
 	[Console]::Error.WriteLine("  Запрет хранится у реквизитов и табличных частей (они наследуют права объекта) либо в роли с setForNewObjects=true; выдача прав — наоборот.")
 }
 
+# Local: a failed auto-validation is the run's result, not a note in the log: the edit is
+# already written, and exit 0 would hide that it does not pass role-validate.
+$script:validateExitCode = 0
 if (-not $NoValidate) {
-	# 1c-rules: the sibling validator lives under the fork's own directory name, and its
-	# verdict propagates - a role that fails validation must not exit 0.
-	$validateScript = Join-Path (Join-Path $PSScriptRoot "..\..\1c-role-validate") "scripts\role-validate.ps1"
-	$validateScript = [System.IO.Path]::GetFullPath($validateScript)
-	if (Test-Path $validateScript) {
-		Write-Host ""
-		Write-Host "--- Running role-validate ---"
-		& powershell.exe -NoProfile -File $validateScript -RightsPath $script:rightsPath
-		if ($LASTEXITCODE -ne 0) {
-			Write-Host "[error] role-validate reported a failure (code $LASTEXITCODE) - the role was written but is invalid" -ForegroundColor Red
-			exit $LASTEXITCODE
-		}
+	Write-Host ""
+	Write-Host "--- Running role-validate ---"
+	& powershell.exe -NoProfile -File $script:validateScript -RightsPath $script:rightsPath
+	$script:validateExitCode = $LASTEXITCODE
+	if ($script:validateExitCode -ne 0) {
+		[Console]::Error.WriteLine("[ERROR] role-validate завершился с кодом $($script:validateExitCode): изменение записано, но роль не проходит проверку. Разберите вывод выше перед загрузкой в базу.")
 	}
 }
+if ($script:validateExitCode -ne 0) { exit $script:validateExitCode }
+exit 0

@@ -1,5 +1,15 @@
-﻿# form-validate v1.36 — Validate 1C managed form
+﻿# form-validate v1.39 — Validate 1C managed form
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: DynamicList attributes without MainTable and QueryText are an error —
+# the form loads but fails to open. A type spelled with an export folder name
+# (cfg:Catalogs.X) is an error (12). The handler check (22) also refuses a
+# handler declared twice (error) and warns on a missing / wrong compilation
+# directive and on more mandatory parameters than the platform passes. Local
+# checks numbered after upstream's last: 28 — the main attribute of a default
+# object / record form belongs to the owner and a zero-length Description / Code
+# is not bound; 29 — form-data conversion outside &НаСервере. (Local 1 — version
+# vs Configuration.xml — was replaced by upstream 14, local 15 — Representation —
+# by upstream 15; local 13 was merged into upstream 22.)
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory, Position=0)]
@@ -346,6 +356,7 @@ foreach ($attr in $attrNodes) {
 			}
 		}
 	}
+
 	$typeVal = ""
 	foreach ($tn in $attr.SelectNodes("f:Type/v8:Type", $nsMgr)) {
 		if ($tn.InnerText) { $typeVal = $tn.InnerText; break }
@@ -968,8 +979,8 @@ if (-not $stopped) {
 			# Тип без имени объекта: динамический список, набор констант, любой отчёт — ровно те три,
 			# что встречаются в формах корпуса (УТ, ERP, БП, УНФ); иное без имени — вероятная опечатка
 			if ($cfgVal -cin @("DynamicList", "ConstantsSet", "ReportObject")) { continue }
-			# 1c-rules: cfg:Catalogs.X is the export folder name, not a type — the platform
-			# refuses it (upstream reported it as an "unrecognized prefix" warning).
+			# Local: cfg:Catalogs.X is the export folder name, not a type — the platform
+			# refuses it (was an "unrecognized prefix" warning).
 			if ($cfgVal -cmatch '^([^.]+)\.' -and $exportFolderTypes.ContainsKey($Matches[1])) {
 				$folder = $Matches[1]
 				$hint = if ($exportFolderTypes[$folder]) { " — a reference type is 'cfg:$($exportFolderTypes[$folder]).<Name>'" } else { "" }
@@ -1000,80 +1011,6 @@ if (-not $stopped) {
 		Report-OK "12. Types: no type values to check"
 	} elseif ($typeOk) {
 		Report-OK "12. Types: $typeChecked values, all valid"
-	}
-}
-
-
-# --- Check 12b (local): the owner of a default object / record form ---
-# A form reached through DefaultObjectForm / DefaultFolderForm / DefaultRecordForm
-# (or the Auxiliary* twin) of a catalog, document, chart, exchange plan, business
-# process, task or information register receives an object of that owner: its main
-# attribute must be <Kind>Object.<Owner> (InformationRegisterRecordManager for a
-# register). A form copied from another object keeps the other owner's type and
-# loads, but fails when it is opened. Data processors and reports are not checked:
-# vendor configurations share one processor's object between several of them.
-# The same main attribute must not bind Description / Code when the owner's
-# DescriptionLength / CodeLength is 0 — the standard attribute does not exist.
-
-$ownerKinds = @("Catalog","Document","ChartOfAccounts","ChartOfCharacteristicTypes","ChartOfCalculationTypes","ExchangePlan","BusinessProcess","Task","InformationRegister")
-$ownerDescriptor = $null
-if (-not $stopped -and $formName) {
-	$formDirPath = Split-Path (Split-Path (Resolve-Path $FormPath).Path -Parent) -Parent
-	$formsDirPath = Split-Path $formDirPath -Parent
-	if ((Split-Path $formsDirPath -Leaf) -ceq "Forms") {
-		$ownerDirPath = Split-Path $formsDirPath -Parent
-		$ownerXmlPath = "$ownerDirPath.xml"
-		if (Test-Path -LiteralPath $ownerXmlPath) {
-			try {
-				$ownerDoc = New-Object System.Xml.XmlDocument
-				$ownerDoc.Load($ownerXmlPath)
-				$ownerDescriptor = $ownerDoc
-			} catch { $ownerDescriptor = $null }
-		}
-	}
-}
-if ($ownerDescriptor) {
-	$mdNs = New-Object System.Xml.XmlNamespaceManager($ownerDescriptor.NameTable)
-	$mdNs.AddNamespace("md", "http://v8.1c.ru/8.3/MDClasses")
-	$ownerNode = $null
-	foreach ($c in $ownerDescriptor.DocumentElement.ChildNodes) { if ($c.NodeType -eq 'Element') { $ownerNode = $c; break } }
-	$ownerProps = if ($ownerNode) { $ownerNode.SelectSingleNode("md:Properties", $mdNs) } else { $null }
-	$ownerKind = if ($ownerNode) { $ownerNode.LocalName } else { "" }
-	$ownerNameNode = if ($ownerProps) { $ownerProps.SelectSingleNode("md:Name", $mdNs) } else { $null }
-	$ownerName = if ($ownerNameNode) { $ownerNameNode.InnerText.Trim() } else { "" }
-	$mainAttr = $null
-	foreach ($attr in $attrNodes) {
-		$mainNode = $attr.SelectSingleNode("f:MainAttribute", $nsMgr)
-		if ($mainNode -and $mainNode.InnerText -eq "true") { $mainAttr = $attr; break }
-	}
-	$mainTypes = @()
-	if ($mainAttr) { foreach ($tn in $mainAttr.SelectNodes("f:Type/v8:Type", $nsMgr)) { if ($tn.InnerText.Trim()) { $mainTypes += $tn.InnerText.Trim() } } }
-	if ($ownerProps -and $ownerName -and ($ownerKinds -ccontains $ownerKind)) {
-		$ownFormRef = "$ownerKind.$ownerName.Form.$formName"
-		$slots = @()
-		foreach ($slot in @("DefaultObjectForm","DefaultFolderForm","DefaultRecordForm","AuxiliaryObjectForm","AuxiliaryFolderForm","AuxiliaryRecordForm")) {
-			$slotNode = $ownerProps.SelectSingleNode("md:$slot", $mdNs)
-			if ($slotNode -and $slotNode.InnerText.Trim() -ceq $ownFormRef) { $slots += $slot }
-		}
-		if ($slots.Count -gt 0 -and $mainAttr) {
-			$expectedType = if ($ownerKind -eq "InformationRegister") { "cfg:InformationRegisterRecordManager.$ownerName" } else { "cfg:$($ownerKind)Object.$ownerName" }
-			if ($mainTypes.Count -ne 1 -or $mainTypes[0] -cne $expectedType) {
-				Report-Error "12b. Main attribute '$($mainAttr.GetAttribute('name'))' has type '$($mainTypes -join ', ')', but the form is $($slots -join ' / ') of $ownerKind.$ownerName — expected '$expectedType' (form copied from another object?)"
-			} else {
-				Report-OK "12b. Owner: main attribute '$($mainAttr.GetAttribute('name'))' is $expectedType"
-			}
-		}
-		if ($mainAttr -and $mainTypes.Count -eq 1 -and $mainTypes[0] -ceq "cfg:$($ownerKind)Object.$ownerName") {
-			$mainName = $mainAttr.GetAttribute("name")
-			$boundPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-			foreach ($dp in $root.GetElementsByTagName("DataPath", "http://v8.1c.ru/8.3/xcf/logform")) { [void]$boundPaths.Add($dp.InnerText.Trim()) }
-			foreach ($pair in @(@("DescriptionLength","Description"), @("CodeLength","Code"))) {
-				$lengthNode = $ownerProps.SelectSingleNode("md:$($pair[0])", $mdNs)
-				if ($lengthNode -and $lengthNode.InnerText.Trim() -eq "0" -and $boundPaths.Contains("$mainName.$($pair[1])")) {
-					Report-Error "12b. '$mainName.$($pair[1])' is bound, but $ownerKind.$ownerName has $($pair[0])=0 — the object has no $($pair[1])"
-				}
-			}
-		}
 	}
 }
 
@@ -2358,6 +2295,99 @@ if (-not $stopped) {
 	if ($check23Ok) { Report-OK "23. Addition sources: match items" }
 }
 
+# --- Local (merged into check 22): declarations, directives and arity of handlers ---
+# A handler declared twice does not compile (error). A missing compilation directive, a
+# client event on a server procedure / *AtServer event on a client one, and more
+# mandatory parameters than the platform passes are warnings: vendor configurations
+# ship all of them. Parsed from the scanner's Code lines (comments and literals out).
+$directiveMap = @{
+	"наклиенте" = "client"; "atclient" = "client"
+	"насервере" = "server"; "atserver" = "server"
+	"насерверебезконтекста" = "servernc"; "atservernocontext" = "servernc"
+	"наклиентенасерверебезконтекста" = "clientservernc"; "atclientatservernocontext" = "clientservernc"
+	"наклиентенасервере" = "clientserver"; "atclientatserver" = "clientserver"
+}
+# Largest number of parameters the platform passes to a handler, per element tag and
+# event (a handler may declare fewer). Unlisted events are not arity-checked.
+$eventArity = @{
+	"Form|OnCreateAtServer" = 2; "Form|OnOpen" = 1; "Form|NotificationProcessing" = 3; "Form|ExternalEvent" = 3
+	"Form|FillCheckProcessingAtServer" = 2; "Form|BeforeClose" = 4; "Form|OnClose" = 1; "Form|ChoiceProcessing" = 2
+	"Form|OnReadAtServer" = 1; "Form|BeforeWrite" = 2; "Form|BeforeWriteAtServer" = 3; "Form|OnWriteAtServer" = 3
+	"Form|AfterWriteAtServer" = 2; "Form|AfterWrite" = 1
+	"InputField|OnChange" = 1; "InputField|StartChoice" = 4; "InputField|Clearing" = 2; "InputField|ChoiceProcessing" = 5
+	"InputField|AutoComplete" = 6; "InputField|TextEditEnd" = 5; "InputField|Opening" = 2
+	"CheckBoxField|OnChange" = 1; "LabelDecoration|Click" = 2; "LabelDecoration|URLProcessing" = 3
+	"LabelField|OnChange" = 1; "LabelField|Click" = 2; "LabelField|URLProcessing" = 3; "RadioButtonField|OnChange" = 1
+	"Pages|OnCurrentPageChange" = 2
+	"Table|Selection" = 4; "Table|OnActivateRow" = 1; "Table|ChoiceProcessing" = 3; "Table|OnStartEdit" = 3
+	"Table|BeforeAddRow" = 6; "Table|BeforeRowChange" = 2; "Table|BeforeDeleteRow" = 2; "Table|AfterDeleteRow" = 1
+	"Table|OnChange" = 1; "Table|OnEditEnd" = 3
+	"Command|Action" = 1
+}
+
+
+function Get-BslProcedures([string[]]$lines) {
+	# name (lower case) -> list of @{ Name; Line; Directive; Params; Required }
+	$result = @{}
+	$declRe = [regex]::new('^\s*(?:(?:Асинх|Async)\s+)?(?:Процедура|Функция|Procedure|Function)\s+([\w]+)\s*\(', 'IgnoreCase')
+	for ($i = 0; $i -lt $lines.Count; $i++) {
+		$m = $declRe.Match($lines[$i])
+		if (-not $m.Success) { continue }
+		$name = $m.Groups[1].Value
+		# Directive: walk back over blank lines, comments and annotations.
+		$directive = $null
+		for ($j = $i - 1; $j -ge 0; $j--) {
+			$t = $lines[$j].Trim()
+			if (-not $t -or $t.StartsWith("//")) { continue }
+			if ($t.StartsWith("&")) {
+				$dm = [regex]::Match($t, '^&\s*(\w+)')
+				if ($dm.Success -and $directiveMap.ContainsKey($dm.Groups[1].Value.ToLowerInvariant())) { $directive = $directiveMap[$dm.Groups[1].Value.ToLowerInvariant()] }
+				continue
+			}
+			break
+		}
+		# Parameters: the text between the declaration's parentheses (strings and
+		# comments skipped, may span lines).
+		$buf = New-Object System.Text.StringBuilder
+		$depth = 0; $inStr = $false; $closed = $false
+		for ($j = $i; $j -lt [Math]::Min($i + 40, $lines.Count) -and -not $closed; $j++) {
+			$s = $lines[$j]
+			$k = if ($j -eq $i) { $m.Index + $m.Length - 1 } else { 0 }
+			while ($k -lt $s.Length) {
+				$ch = $s[$k]
+				if ($inStr) { [void]$buf.Append($ch); if ($ch -eq '"') { $inStr = $false }; $k++; continue }
+				if ($ch -eq '"') { $inStr = $true; [void]$buf.Append($ch) }
+				elseif ($ch -eq '/' -and $k + 1 -lt $s.Length -and $s[$k + 1] -eq '/') { break }
+				elseif ($ch -eq '(') { $depth++; if ($depth -gt 1) { [void]$buf.Append($ch) } }
+				elseif ($ch -eq ')') { $depth--; if ($depth -eq 0) { $closed = $true; break }; [void]$buf.Append($ch) }
+				elseif ($depth -ge 1) { [void]$buf.Append($ch) }
+				$k++
+			}
+			[void]$buf.Append(' ')
+		}
+		$params = $null; $required = $null
+		if ($closed) {
+			$parts = @(); $cur = New-Object System.Text.StringBuilder; $pInStr = $false; $pDepth = 0
+			foreach ($ch in $buf.ToString().ToCharArray()) {
+				if ($pInStr) { [void]$cur.Append($ch); if ($ch -eq '"') { $pInStr = $false }; continue }
+				if ($ch -eq '"') { $pInStr = $true }
+				if ($ch -eq '(') { $pDepth++ }
+				if ($ch -eq ')') { $pDepth-- }
+				if ($ch -eq ',' -and $pDepth -eq 0) { $parts += $cur.ToString(); $cur = New-Object System.Text.StringBuilder; continue }
+				[void]$cur.Append($ch)
+			}
+			$parts += $cur.ToString()
+			$parts = @($parts | Where-Object { $_.Trim() })
+			$params = $parts.Count
+			$required = @($parts | Where-Object { -not $_.Contains("=") }).Count
+		}
+		$key = $name.ToLowerInvariant()
+		if (-not $result.ContainsKey($key)) { $result[$key] = @() }
+		$result[$key] += @{ Name = $name; Line = $i + 1; Directive = $directive; Params = $params; Required = $required }
+	}
+	return $result
+}
+
 # --- Check 22: обработчики — модуль формы ---
 # Привязки Form.xml (события, действия команд) сверяются с процедурами модуля <каталог Form.xml>/Form/Module.bsl.
 # Читается только модуль формы: общие модули, которые подключают процедуры формы по имени, не смотрим —
@@ -2506,6 +2536,64 @@ if (-not $stopped) {
 			}
 		}
 
+		# Local (former check 13): the bound procedures themselves — declared once, the
+		# right compilation directive, no more mandatory parameters than the platform passes.
+		$declared = Get-BslProcedures $bsl.Code
+		$handlerRefs = @()
+		foreach ($evt in $root.SelectNodes(".//f:Events/f:Event[not(ancestor::f:BaseForm)]", $nsMgr)) {
+			$h = $evt.InnerText.Trim()
+			if (-not $h) { continue }
+			$evtName = $evt.GetAttribute('name')
+			if ($evtName -match $guidRx) { continue }
+			if ($hasBaseForm -and -not $evt.GetAttribute('callType')) { continue }
+			$owner = $evt.ParentNode.ParentNode
+			$ownerTag = if ($owner -eq $root) { "Form" } else { $owner.LocalName }
+			$where = if ($owner -eq $root) { "Form event '$evtName'" } else { "Event '$evtName' of $($owner.LocalName) '$($owner.GetAttribute('name'))'" }
+			$handlerRefs += @{ Owner = $ownerTag; Event = $evtName; Handler = $h; Where = $where }
+		}
+		foreach ($cmd in $cmdNodes) {
+			foreach ($act in $cmd.SelectNodes("f:Action", $nsMgr)) {
+				$h = $act.InnerText.Trim()
+				if (-not $h) { continue }
+				if ($hasBaseForm -and -not $act.GetAttribute('callType')) { continue }
+				$handlerRefs += @{ Owner = "Command"; Event = "Action"; Handler = $h; Where = "Command '$($cmd.GetAttribute('name'))'" }
+			}
+		}
+		$seenDuplicates = @{}
+		foreach ($ref in $handlerRefs) {
+			if ($stopped) { break }
+			$decls = $declared[$ref.Handler.ToLowerInvariant()]
+			if (-not $decls) { continue }   # reported above: not found
+			if (@($decls).Count -gt 1) {
+				if (-not $seenDuplicates.ContainsKey($ref.Handler.ToLowerInvariant())) {
+					$seenDuplicates[$ref.Handler.ToLowerInvariant()] = $true
+					Report-Error "22. Handler '$($ref.Handler)' is declared $(@($decls).Count) times in the form module (lines $((@($decls) | ForEach-Object { $_.Line }) -join ', ')) — the module does not compile"
+					$check22Ok = $false
+				}
+				continue
+			}
+			$decl = @($decls)[0]
+			if ($ref.Event -cnotmatch '^[A-Za-z]\w*$') { continue }
+			if (-not $decl.Directive) {
+				Report-Warn "22. $($ref.Where): handler '$($decl.Name)' (Module.bsl:$($decl.Line)) has no compilation directive — it compiles &НаСервере"
+				$check22Ok = $false
+			} else {
+				$serverEvent = $ref.Event.EndsWith("AtServer")
+				if ($serverEvent -and $decl.Directive -ne "server" -and $decl.Directive -ne "servernc") {
+					Report-Warn "22. $($ref.Where): handler '$($decl.Name)' (Module.bsl:$($decl.Line)) is not a server procedure — a *AtServer event needs &НаСервере"
+					$check22Ok = $false
+				} elseif (-not $serverEvent -and $decl.Directive -ne "client") {
+					Report-Warn "22. $($ref.Where): handler '$($decl.Name)' (Module.bsl:$($decl.Line)) is not &НаКлиенте — client events and commands run on the client"
+					$check22Ok = $false
+				}
+			}
+			$arityKey = "$($ref.Owner)|$($ref.Event)"
+			if ($eventArity.ContainsKey($arityKey) -and $null -ne $decl.Required -and $decl.Required -gt $eventArity[$arityKey]) {
+				Report-Warn "22. $($ref.Where): handler '$($decl.Name)' (Module.bsl:$($decl.Line)) requires $($decl.Required) parameters, the platform passes at most $($eventArity[$arityKey])"
+				$check22Ok = $false
+			}
+		}
+
 		# Процедура без привязки. Не висячая: экспортная, с аннотацией расширения, Подключаемый_* (их подключает
 		# БСП), имя в коде модуля или равно литералу, имя оканчивается куском склейки в позиции обработчика.
 		$lits = @{}
@@ -2584,245 +2672,6 @@ function Get-FormAttributeMap {
 	return $map
 }
 
-# --- Check 26 (local delta): declarations and compilation context of the handlers --- ---
-# Every event handler and command Action named in Form.xml must be a procedure of
-# the form module, declared once (a duplicate does not compile — error). The rest
-# are warnings, because vendor configurations ship all of them: a handler that is
-# missing, has no compilation directive, runs in the wrong context (client event
-# on a server procedure, *AtServer event or command on a client one), or has more
-# mandatory parameters than the platform passes for that event.
-# Check 27 (local delta): РеквизитФормыВЗначение / ЗначениеВРеквизитФормы need the form
-# context on the server — a call in a procedure explicitly compiled &НаКлиенте,
-# &НаСервереБезКонтекста or &НаКлиентеНаСервереБезКонтекста is an error. A procedure
-# without a directive is server-side in a form module and is accepted.
-
-$modulePath = Join-Path (Join-Path (Split-Path (Resolve-Path $FormPath).Path -Parent) "Form") "Module.bsl"
-$directiveMap = @{
-	"наклиенте" = "client"; "atclient" = "client"
-	"насервере" = "server"; "atserver" = "server"
-	"насерверебезконтекста" = "servernc"; "atservernocontext" = "servernc"
-	"наклиентенасерверебезконтекста" = "clientservernc"; "atclientatservernocontext" = "clientservernc"
-	"наклиентенасервере" = "clientserver"; "atclientatserver" = "clientserver"
-}
-# Largest number of parameters the platform passes to a handler, per element tag and
-# event (a handler may declare fewer). Unlisted events are not arity-checked.
-$eventArity = @{
-	"Form|OnCreateAtServer" = 2; "Form|OnOpen" = 1; "Form|NotificationProcessing" = 3; "Form|ExternalEvent" = 3
-	"Form|FillCheckProcessingAtServer" = 2; "Form|BeforeClose" = 4; "Form|OnClose" = 1; "Form|ChoiceProcessing" = 2
-	"Form|OnReadAtServer" = 1; "Form|BeforeWrite" = 2; "Form|BeforeWriteAtServer" = 3; "Form|OnWriteAtServer" = 3
-	"Form|AfterWriteAtServer" = 2; "Form|AfterWrite" = 1
-	"InputField|OnChange" = 1; "InputField|StartChoice" = 4; "InputField|Clearing" = 2; "InputField|ChoiceProcessing" = 5
-	"InputField|AutoComplete" = 6; "InputField|TextEditEnd" = 5; "InputField|Opening" = 2
-	"CheckBoxField|OnChange" = 1; "LabelDecoration|Click" = 2; "LabelDecoration|URLProcessing" = 3
-	"LabelField|OnChange" = 1; "LabelField|Click" = 2; "LabelField|URLProcessing" = 3; "RadioButtonField|OnChange" = 1
-	"Pages|OnCurrentPageChange" = 2
-	"Table|Selection" = 4; "Table|OnActivateRow" = 1; "Table|ChoiceProcessing" = 3; "Table|OnStartEdit" = 3
-	"Table|BeforeAddRow" = 6; "Table|BeforeRowChange" = 2; "Table|BeforeDeleteRow" = 2; "Table|AfterDeleteRow" = 1
-	"Table|OnChange" = 1; "Table|OnEditEnd" = 3
-	"Command|Action" = 1
-}
-
-function Get-BslProcedures([string[]]$lines) {
-	# name (lower case) -> list of @{ Name; Line; Directive; Params; Required }
-	$result = @{}
-	$declRe = [regex]::new('^\s*(?:(?:Асинх|Async)\s+)?(?:Процедура|Функция|Procedure|Function)\s+([\w]+)\s*\(', 'IgnoreCase')
-	for ($i = 0; $i -lt $lines.Count; $i++) {
-		$m = $declRe.Match($lines[$i])
-		if (-not $m.Success) { continue }
-		$name = $m.Groups[1].Value
-		# Directive: walk back over blank lines, comments and annotations.
-		$directive = $null
-		for ($j = $i - 1; $j -ge 0; $j--) {
-			$t = $lines[$j].Trim()
-			if (-not $t -or $t.StartsWith("//")) { continue }
-			if ($t.StartsWith("&")) {
-				$dm = [regex]::Match($t, '^&\s*(\w+)')
-				if ($dm.Success -and $directiveMap.ContainsKey($dm.Groups[1].Value.ToLowerInvariant())) { $directive = $directiveMap[$dm.Groups[1].Value.ToLowerInvariant()] }
-				continue
-			}
-			break
-		}
-		# Parameters: the text between the declaration's parentheses (strings and
-		# comments skipped, may span lines).
-		$buf = New-Object System.Text.StringBuilder
-		$depth = 0; $inStr = $false; $closed = $false
-		for ($j = $i; $j -lt [Math]::Min($i + 40, $lines.Count) -and -not $closed; $j++) {
-			$s = $lines[$j]
-			$k = if ($j -eq $i) { $m.Index + $m.Length - 1 } else { 0 }
-			while ($k -lt $s.Length) {
-				$ch = $s[$k]
-				if ($inStr) { [void]$buf.Append($ch); if ($ch -eq '"') { $inStr = $false }; $k++; continue }
-				if ($ch -eq '"') { $inStr = $true; [void]$buf.Append($ch) }
-				elseif ($ch -eq '/' -and $k + 1 -lt $s.Length -and $s[$k + 1] -eq '/') { break }
-				elseif ($ch -eq '(') { $depth++; if ($depth -gt 1) { [void]$buf.Append($ch) } }
-				elseif ($ch -eq ')') { $depth--; if ($depth -eq 0) { $closed = $true; break }; [void]$buf.Append($ch) }
-				elseif ($depth -ge 1) { [void]$buf.Append($ch) }
-				$k++
-			}
-			[void]$buf.Append(' ')
-		}
-		$params = $null; $required = $null
-		if ($closed) {
-			$parts = @(); $cur = New-Object System.Text.StringBuilder; $pInStr = $false; $pDepth = 0
-			foreach ($ch in $buf.ToString().ToCharArray()) {
-				if ($pInStr) { [void]$cur.Append($ch); if ($ch -eq '"') { $pInStr = $false }; continue }
-				if ($ch -eq '"') { $pInStr = $true }
-				if ($ch -eq '(') { $pDepth++ }
-				if ($ch -eq ')') { $pDepth-- }
-				if ($ch -eq ',' -and $pDepth -eq 0) { $parts += $cur.ToString(); $cur = New-Object System.Text.StringBuilder; continue }
-				[void]$cur.Append($ch)
-			}
-			$parts += $cur.ToString()
-			$parts = @($parts | Where-Object { $_.Trim() })
-			$params = $parts.Count
-			$required = @($parts | Where-Object { -not $_.Contains("=") }).Count
-		}
-		$key = $name.ToLowerInvariant()
-		if (-not $result.ContainsKey($key)) { $result[$key] = @() }
-		$result[$key] += @{ Name = $name; Line = $i + 1; Directive = $directive; Params = $params; Required = $required }
-	}
-	return $result
-}
-
-function Get-FormDataConversions([string[]]$lines) {
-	# @{ Line; Procedure; Directive; Call } for every unqualified conversion call
-	$found = @()
-	$declRe = [regex]::new('^\s*(?:(?:Асинх|Async)\s+)?(?:Процедура|Функция|Procedure|Function)\s+([\w]+)\s*\(', 'IgnoreCase')
-	$endRe = [regex]::new('^\s*(?:КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b', 'IgnoreCase')
-	$callRe = [regex]::new('(?<![\w.])(РеквизитФормыВЗначение|ЗначениеВРеквизитФормы|FormAttributeToValue|ValueToFormAttribute)\s*\(', 'IgnoreCase')
-	$cur = $null; $curDirective = $null; $pending = $null; $inStr = $false
-	for ($i = 0; $i -lt $lines.Count; $i++) {
-		$line = $lines[$i]
-		# Strip string literals (a multi-line literal continues on lines starting with |) and comments.
-		if ($inStr -and -not $line.TrimStart().StartsWith("|")) { $inStr = $false }
-		$code = New-Object System.Text.StringBuilder
-		$k = 0
-		while ($k -lt $line.Length) {
-			$ch = $line[$k]
-			if ($inStr) {
-				if ($ch -eq '"') {
-					if ($k + 1 -lt $line.Length -and $line[$k + 1] -eq '"') { $k += 2; continue }
-					$inStr = $false
-				}
-				$k++; continue
-			}
-			if ($ch -eq '"') { $inStr = $true; $k++; continue }
-			if ($ch -eq '/' -and $k + 1 -lt $line.Length -and $line[$k + 1] -eq '/') { break }
-			[void]$code.Append($ch); $k++
-		}
-		$c = $code.ToString()
-		$t = $c.Trim()
-		if ($t.StartsWith("&")) {
-			$dm = [regex]::Match($t, '^&\s*(\w+)')
-			if ($dm.Success -and $directiveMap.ContainsKey($dm.Groups[1].Value.ToLowerInvariant())) { $pending = $directiveMap[$dm.Groups[1].Value.ToLowerInvariant()] }
-			continue
-		}
-		$dmatch = $declRe.Match($c)
-		if ($dmatch.Success) { $cur = $dmatch.Groups[1].Value; $curDirective = $pending; $pending = $null }
-		if ($endRe.IsMatch($c)) { $cur = $null; $curDirective = $null; continue }
-		foreach ($cm in $callRe.Matches($c)) {
-			$found += @{ Line = $i + 1; Procedure = $cur; Directive = $curDirective; Call = $cm.Groups[1].Value }
-		}
-	}
-	return $found
-}
-
-if (-not $stopped -and (Test-Path -LiteralPath $modulePath)) {
-	$moduleLines = [System.IO.File]::ReadAllLines($modulePath, [System.Text.Encoding]::UTF8)
-	$procedures = Get-BslProcedures $moduleLines
-
-	# References: form events, element events, command actions. In a borrowed form
-	# (BaseForm) only the extension's own references are checked: an event with a
-	# callType, an element with id >= 1000000, a command absent from the base form.
-	$refs = @()
-	$baseCmds = @{}
-	if ($hasBaseForm) {
-		foreach ($bCmd in $root.SelectNodes("f:BaseForm/f:Commands/f:Command", $nsMgr)) { $baseCmds[$bCmd.GetAttribute("name")] = $true }
-	}
-	$formEventsNode = $root.SelectSingleNode("f:Events", $nsMgr)
-	if ($formEventsNode) {
-		foreach ($evt in $formEventsNode.SelectNodes("f:Event", $nsMgr)) {
-			if ($hasBaseForm -and -not $evt.GetAttribute("callType")) { continue }
-			$refs += @{ Owner = "Form"; Event = $evt.GetAttribute("name"); Handler = $evt.InnerText.Trim(); Where = "Form event '$($evt.GetAttribute('name'))'" }
-		}
-	}
-	foreach ($el in $allElements) {
-		$eventsNode = $el.Node.SelectSingleNode("f:Events", $nsMgr)
-		if (-not $eventsNode) { continue }
-		$isBaseElement = $false
-		if ($hasBaseForm) { try { $isBaseElement = ([int]$el.Id -lt 1000000) } catch {} }
-		foreach ($evt in $eventsNode.SelectNodes("f:Event", $nsMgr)) {
-			if ($isBaseElement -and -not $evt.GetAttribute("callType")) { continue }
-			$refs += @{ Owner = $el.Tag; Event = $evt.GetAttribute("name"); Handler = $evt.InnerText.Trim(); Where = "[$($el.Tag)] '$($el.Name)' event '$($evt.GetAttribute('name'))'" }
-		}
-	}
-	foreach ($cmd in $cmdNodes) {
-		$cName = $cmd.GetAttribute("name")
-		foreach ($action in $cmd.SelectNodes("f:Action", $nsMgr)) {
-			if ($hasBaseForm -and $baseCmds.ContainsKey($cName) -and -not $action.GetAttribute("callType")) { continue }
-			$refs += @{ Owner = "Command"; Event = "Action"; Handler = $action.InnerText.Trim(); Where = "Command '$cName'" }
-		}
-	}
-
-	$handlerErrors = 0
-	$handlerWarnings = 0
-	$handlersChecked = 0
-	$seenDuplicates = @{}
-	foreach ($ref in $refs) {
-		if ($stopped) { break }
-		if (-not $ref.Handler) { continue }
-		$handlersChecked++
-		$decls = $procedures[$ref.Handler.ToLowerInvariant()]
-		# A handler missing from the module is Check 22's finding; repeating it here would
-		# report one defect twice. This check reports what 22 does not: duplicates,
-		# compilation context and arity.
-		if (-not $decls) { continue }
-		if (@($decls).Count -gt 1) {
-			if (-not $seenDuplicates.ContainsKey($ref.Handler.ToLowerInvariant())) {
-				$seenDuplicates[$ref.Handler.ToLowerInvariant()] = $true
-				Report-Error "26. Handler '$($ref.Handler)' is declared $(@($decls).Count) times in Module.bsl (lines $((@($decls) | ForEach-Object { $_.Line }) -join ', ')) — the module does not compile"
-				$handlerErrors++
-			}
-			continue
-		}
-		$decl = @($decls)[0]
-		# Events are named by an identifier; a UUID-named event carries no contract here.
-		if ($ref.Event -cnotmatch '^[A-Za-z]\w*$') { continue }
-		if (-not $decl.Directive) {
-			Report-Warn "26. $($ref.Where): handler '$($decl.Name)' (line $($decl.Line)) has no compilation directive — it compiles &НаСервере"
-			$handlerWarnings++
-		} else {
-			$serverEvent = $ref.Event.EndsWith("AtServer")
-			if ($serverEvent -and $decl.Directive -ne "server" -and $decl.Directive -ne "servernc") {
-				Report-Warn "26. $($ref.Where): handler '$($decl.Name)' (line $($decl.Line)) is not a server procedure — a *AtServer event needs &НаСервере"
-				$handlerWarnings++
-			} elseif (-not $serverEvent -and $decl.Directive -ne "client") {
-				Report-Warn "26. $($ref.Where): handler '$($decl.Name)' (line $($decl.Line)) is not &НаКлиенте — client events and commands run on the client"
-				$handlerWarnings++
-			}
-		}
-		$arityKey = "$($ref.Owner)|$($ref.Event)"
-		if ($eventArity.ContainsKey($arityKey) -and $null -ne $decl.Required -and $decl.Required -gt $eventArity[$arityKey]) {
-			Report-Warn "26. $($ref.Where): handler '$($decl.Name)' (line $($decl.Line)) requires $($decl.Required) parameters, the platform passes at most $($eventArity[$arityKey])"
-			$handlerWarnings++
-		}
-	}
-	if ($handlerErrors -eq 0 -and $handlerWarnings -eq 0) {
-		if ($handlersChecked -gt 0) { Report-OK "26. Handlers: $handlersChecked references match Module.bsl" } else { Report-OK "26. Handlers: none referenced" }
-	}
-
-	$conversionErrors = 0
-	foreach ($conv in (Get-FormDataConversions $moduleLines)) {
-		if ($stopped) { break }
-		if ($conv.Directive -and $conv.Directive -ne "server") {
-			$dirName = switch ($conv.Directive) { "client" { "&НаКлиенте" } "servernc" { "&НаСервереБезКонтекста" } "clientservernc" { "&НаКлиентеНаСервереБезКонтекста" } default { "&НаКлиентеНаСервере" } }
-			Report-Error "27. Module.bsl line $($conv.Line): $($conv.Call) in '$($conv.Procedure)' compiled $dirName — it needs the form context on the server (&НаСервере)"
-			$conversionErrors++
-		}
-	}
-	if ($conversionErrors -eq 0) { Report-OK "27. Form data conversion: server context only" }
-}
-
 # --- Check 24: переменные модуля против реквизитов формы ---
 # Переменная модуля (Перем вне процедур) с именем реквизита формы — модуль не компилируется: «Переменная
 # с указанным именем уже определена». Загрузка XML и обновление конфигурации этого не показывают — ошибка
@@ -2895,6 +2744,206 @@ if (-not $stopped) {
 			}
 		}
 		if ($check25Ok) { Report-OK "25. Conditional appearance fields: rooted at form attributes" }
+	}
+}
+
+# --- Check 26: значение ссылки в отборе/параметре (dcscor:DesignTimeValue) ---
+# Вид "Enum.X.EnumValue.Y" (формат списка выбора) платформа здесь не разрешает: загрузка проходит,
+# значение остаётся строкой, и условие с ним никогда не выполняется (замер 8.3.24).
+if (-not $stopped) {
+	$check26Ok = $true
+	foreach ($n in $xmlDoc.SelectNodes("//*[@xsi:type]", $nsMgr)) {
+		if (-not $n.GetAttribute("type", "http://www.w3.org/2001/XMLSchema-instance").EndsWith(':DesignTimeValue')) { continue }
+		$v = $n.InnerText.Trim()
+		if ($v -match '^(Enum|Перечисление)\.([^.]+)\.(EnumValue|ЗначениеПеречисления)\.(.+)$') {
+			$fixed = "Перечисление." + $Matches[2] + "." + $Matches[4]
+			Report-Error "26. Design-time value '$v' — the platform does not resolve the EnumValue form here, the condition never matches; write '$fixed'"
+			$check26Ok = $false
+		}
+	}
+	if ($check26Ok) { Report-OK "26. Design-time values: resolvable" }
+}
+
+# --- Check 27: имена цветов web:/win: — из палитры платформы ---
+# Палитры — таблицы платформы (core83/core85.dll, одинаковы 8.3.20…8.5). Имя вне палитры — загрузка
+# отвергает Form.xml целиком («Исключение XDTO»). Регистр платформа не различает (web:red → web:Red).
+$script:webColors = @(
+	'AliceBlue','AntiqueWhite','Aqua','Aquamarine','Azure','Beige','Bisque','Black','BlanchedAlmond','Blue',
+	'BlueViolet','Brown','BurlyWood','CadetBlue','Chartreuse','Chocolate','Coral','CornFlowerBlue','CornSilk','Cream',
+	'Crimson','Cyan','DarkBlue','DarkCyan','DarkGoldenRod','DarkGray','DarkGreen','DarkKhaki','DarkMagenta','DarkOliveGreen',
+	'DarkOrange','DarkOrchid','DarkRed','DarkSalmon','DarkSeaGreen','DarkSlateBlue','DarkSlateGray','DarkTurquoise','DarkViolet','DeepPink',
+	'DeepSkyBlue','DimGray','DodgerBlue','FireBrick','FloralWhite','ForestGreen','Fuchsia','Gainsboro','GhostWhite','Gold',
+	'Goldenrod','Gray','Green','GreenYellow','HoneyDew','HotPink','IndianRed','Indigo','Ivory','Khaki',
+	'Lavender','LavenderBlush','LawnGreen','LemonChiffon','LightBlue','LightCoral','LightCyan','LightGoldenRod','LightGoldenRodYellow','LightGray',
+	'LightGreen','LightPink','LightSalmon','LightSeaGreen','LightSkyBlue','LightSlateGray','LightSlateBlue','LightSteelBlue','LightYellow','Lime',
+	'LimeGreen','Linen','Magenta','Maroon','MediumAquaMarine','MediumBlue','MediumGray','MediumGreen','MediumOrchid','MediumPurple',
+	'MediumSeaGreen','MediumSlateBlue','MediumSpringGreen','MediumTurquoise','MediumVioletRed','MidnightBlue','MintCream','MistyRose','Moccasin','NavajoWhite',
+	'Navy','OldLace','Olive','Olivedrab','Orange','OrangeRed','Orchid','PaleGoldenrod','PaleGreen','PaleTurquoise',
+	'PaleVioletRed','PapayaWhip','PeachPuff','Peru','Pink','Plum','PowderBlue','Purple','Red','RosyBrown',
+	'RoyalBlue','SaddleBrown','Salmon','SandyBrown','Seagreen','SeaShell','Sienna','Silver','SkyBlue','SlateBlue',
+	'SlateGray','Snow','SpringGreen','SteelBlue','Tan','Teal','Thistle','Tomato','Turquoise','Violet',
+	'VioletRed','Wheat','White','WhiteSmoke','Yellow','YellowGreen'
+)
+$script:winColors = @(
+	'ScrollBar','Desktop','ActiveTitleBar','InactiveTitleBar','MenuBar','WindowBackground','WindowFrame','MenuItemText','WindowText','ActiveTitleBarText',
+	'ActiveBorder','InactiveBorder','ApplicationWorkspace','Highlight','HighlightText','ButtonFace','ButtonShadow','DisabledText','ButtonText','InactiveTitleBarText',
+	'ButtonHighlight','ButtonDarkShadow','ButtonLightShadow','ToolTipText','ToolTip','HotLight','GradientActiveCaption','GradientInactiveCaption','MiddleGradientActiveCaption','MiddleGradientInactiveCaption'
+)
+if (-not $stopped) {
+	$check27Ok = $true
+	$seen27 = @{}
+	foreach ($n in $xmlDoc.SelectNodes("//*[not(*)]", $nsMgr)) {
+		$xt = $n.GetAttribute("type", "http://www.w3.org/2001/XMLSchema-instance")
+		if (-not ($xt.EndsWith(':Color') -or $n.LocalName.EndsWith('Color'))) { continue }
+		$v = $n.InnerText.Trim()
+		if ($v -notmatch '^(web|win):(\w+)$' -or $seen27.ContainsKey($v)) { continue }
+		$seen27[$v] = $true
+		$palette = if ($Matches[1] -eq 'web') { $script:webColors } else { $script:winColors }
+		if ($palette -notcontains $Matches[2]) {
+			$hint = if ($Matches[1] -eq 'win' -and $Matches[2] -eq 'GrayText') { " (the platform name is win:DisabledText)" } else { "" }
+			Report-Error "27. Color '$v' is not in the platform $($Matches[1]): palette$hint — the platform rejects the whole form on load"
+			$check27Ok = $false
+		}
+	}
+	if ($check27Ok) { Report-OK "27. Color names: in platform palettes" }
+}
+
+# --- Check 28 (local, was 12b): the owner of a default object / record form ---
+# A form reached through DefaultObjectForm / DefaultFolderForm / DefaultRecordForm
+# (or the Auxiliary* twin) of a catalog, document, chart, exchange plan, business
+# process, task or information register receives an object of that owner: its main
+# attribute must be <Kind>Object.<Owner> (InformationRegisterRecordManager for a
+# register). A form copied from another object keeps the other owner's type and
+# loads, but fails when it is opened. Data processors and reports are not checked:
+# vendor configurations share one processor's object between several of them.
+# The same main attribute must not bind Description / Code when the owner's
+# DescriptionLength / CodeLength is 0 — the standard attribute does not exist.
+
+$ownerKinds = @("Catalog","Document","ChartOfAccounts","ChartOfCharacteristicTypes","ChartOfCalculationTypes","ExchangePlan","BusinessProcess","Task","InformationRegister")
+$ownerDescriptor = $null
+if (-not $stopped -and $formName) {
+	$formDirPath = Split-Path (Split-Path (Resolve-Path $FormPath).ProviderPath -Parent) -Parent
+	$formsDirPath = Split-Path $formDirPath -Parent
+	if ((Split-Path $formsDirPath -Leaf) -ceq "Forms") {
+		$ownerDirPath = Split-Path $formsDirPath -Parent
+		$ownerXmlPath = "$ownerDirPath.xml"
+		if (Test-Path -LiteralPath $ownerXmlPath) {
+			try {
+				$ownerDoc = New-Object System.Xml.XmlDocument
+				$ownerDoc.Load($ownerXmlPath)
+				$ownerDescriptor = $ownerDoc
+			} catch { $ownerDescriptor = $null }
+		}
+	}
+}
+if ($ownerDescriptor) {
+	$mdNs = New-Object System.Xml.XmlNamespaceManager($ownerDescriptor.NameTable)
+	$mdNs.AddNamespace("md", "http://v8.1c.ru/8.3/MDClasses")
+	$ownerNode = $null
+	foreach ($c in $ownerDescriptor.DocumentElement.ChildNodes) { if ($c.NodeType -eq 'Element') { $ownerNode = $c; break } }
+	$ownerProps = if ($ownerNode) { $ownerNode.SelectSingleNode("md:Properties", $mdNs) } else { $null }
+	$ownerKind = if ($ownerNode) { $ownerNode.LocalName } else { "" }
+	$ownerNameNode = if ($ownerProps) { $ownerProps.SelectSingleNode("md:Name", $mdNs) } else { $null }
+	$ownerName = if ($ownerNameNode) { $ownerNameNode.InnerText.Trim() } else { "" }
+	$mainAttr = $null
+	foreach ($attr in $attrNodes) {
+		$mainNode = $attr.SelectSingleNode("f:MainAttribute", $nsMgr)
+		if ($mainNode -and $mainNode.InnerText -eq "true") { $mainAttr = $attr; break }
+	}
+	$mainTypes = @()
+	if ($mainAttr) { foreach ($tn in $mainAttr.SelectNodes("f:Type/v8:Type", $nsMgr)) { if ($tn.InnerText.Trim()) { $mainTypes += $tn.InnerText.Trim() } } }
+	if ($ownerProps -and $ownerName -and ($ownerKinds -ccontains $ownerKind)) {
+		$ownFormRef = "$ownerKind.$ownerName.Form.$formName"
+		$slots = @()
+		foreach ($slot in @("DefaultObjectForm","DefaultFolderForm","DefaultRecordForm","AuxiliaryObjectForm","AuxiliaryFolderForm","AuxiliaryRecordForm")) {
+			$slotNode = $ownerProps.SelectSingleNode("md:$slot", $mdNs)
+			if ($slotNode -and $slotNode.InnerText.Trim() -ceq $ownFormRef) { $slots += $slot }
+		}
+		if ($slots.Count -gt 0 -and $mainAttr) {
+			$expectedType = if ($ownerKind -eq "InformationRegister") { "cfg:InformationRegisterRecordManager.$ownerName" } else { "cfg:$($ownerKind)Object.$ownerName" }
+			if ($mainTypes.Count -ne 1 -or $mainTypes[0] -cne $expectedType) {
+				Report-Error "28. Main attribute '$($mainAttr.GetAttribute('name'))' has type '$($mainTypes -join ', ')', but the form is $($slots -join ' / ') of $ownerKind.$ownerName — expected '$expectedType' (form copied from another object?)"
+			} else {
+				Report-OK "28. Owner: main attribute '$($mainAttr.GetAttribute('name'))' is $expectedType"
+			}
+		}
+		if ($mainAttr -and $mainTypes.Count -eq 1 -and $mainTypes[0] -ceq "cfg:$($ownerKind)Object.$ownerName") {
+			$mainName = $mainAttr.GetAttribute("name")
+			$boundPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+			foreach ($dp in $root.GetElementsByTagName("DataPath", "http://v8.1c.ru/8.3/xcf/logform")) { [void]$boundPaths.Add($dp.InnerText.Trim()) }
+			foreach ($pair in @(@("DescriptionLength","Description"), @("CodeLength","Code"))) {
+				$lengthNode = $ownerProps.SelectSingleNode("md:$($pair[0])", $mdNs)
+				if ($lengthNode -and $lengthNode.InnerText.Trim() -eq "0" -and $boundPaths.Contains("$mainName.$($pair[1])")) {
+					Report-Error "28. '$mainName.$($pair[1])' is bound, but $ownerKind.$ownerName has $($pair[0])=0 — the object has no $($pair[1])"
+				}
+			}
+		}
+	}
+}
+
+
+# --- Check 29 (local, was 14): form data conversion needs the server form context ---
+# РеквизитФормыВЗначение / ЗначениеВРеквизитФормы need the form context on the server —
+# a call in a procedure explicitly compiled &НаКлиенте, &НаСервереБезКонтекста or
+# &НаКлиентеНаСервереБезКонтекста is an error. A procedure without a directive is
+# server-side in a form module and is accepted.
+function Get-FormDataConversions([string[]]$lines) {
+	# @{ Line; Procedure; Directive; Call } for every unqualified conversion call
+	$found = @()
+	$declRe = [regex]::new('^\s*(?:(?:Асинх|Async)\s+)?(?:Процедура|Функция|Procedure|Function)\s+([\w]+)\s*\(', 'IgnoreCase')
+	$endRe = [regex]::new('^\s*(?:КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)\b', 'IgnoreCase')
+	$callRe = [regex]::new('(?<![\w.])(РеквизитФормыВЗначение|ЗначениеВРеквизитФормы|FormAttributeToValue|ValueToFormAttribute)\s*\(', 'IgnoreCase')
+	$cur = $null; $curDirective = $null; $pending = $null; $inStr = $false
+	for ($i = 0; $i -lt $lines.Count; $i++) {
+		$line = $lines[$i]
+		# Strip string literals (a multi-line literal continues on lines starting with |) and comments.
+		if ($inStr -and -not $line.TrimStart().StartsWith("|")) { $inStr = $false }
+		$code = New-Object System.Text.StringBuilder
+		$k = 0
+		while ($k -lt $line.Length) {
+			$ch = $line[$k]
+			if ($inStr) {
+				if ($ch -eq '"') {
+					if ($k + 1 -lt $line.Length -and $line[$k + 1] -eq '"') { $k += 2; continue }
+					$inStr = $false
+				}
+				$k++; continue
+			}
+			if ($ch -eq '"') { $inStr = $true; $k++; continue }
+			if ($ch -eq '/' -and $k + 1 -lt $line.Length -and $line[$k + 1] -eq '/') { break }
+			[void]$code.Append($ch); $k++
+		}
+		$c = $code.ToString()
+		$t = $c.Trim()
+		if ($t.StartsWith("&")) {
+			$dm = [regex]::Match($t, '^&\s*(\w+)')
+			if ($dm.Success -and $directiveMap.ContainsKey($dm.Groups[1].Value.ToLowerInvariant())) { $pending = $directiveMap[$dm.Groups[1].Value.ToLowerInvariant()] }
+			continue
+		}
+		$dmatch = $declRe.Match($c)
+		if ($dmatch.Success) { $cur = $dmatch.Groups[1].Value; $curDirective = $pending; $pending = $null }
+		if ($endRe.IsMatch($c)) { $cur = $null; $curDirective = $null; continue }
+		foreach ($cm in $callRe.Matches($c)) {
+			$found += @{ Line = $i + 1; Procedure = $cur; Directive = $curDirective; Call = $cm.Groups[1].Value }
+		}
+	}
+	return $found
+}
+
+if (-not $stopped) {
+	$convModulePath = Join-Path (Split-Path (Resolve-Path $FormPath).ProviderPath -Parent) "Form/Module.bsl"
+	$convText = if (Test-Path -LiteralPath $convModulePath) { Read-ModuleText $convModulePath } else { $null }
+	if ($null -ne $convText) {
+		$conversionErrors = 0
+		foreach ($conv in (Get-FormDataConversions ($convText -replace "`r", "" -split "`n"))) {
+			if ($stopped) { break }
+			if ($conv.Directive -and $conv.Directive -ne "server") {
+				$dirName = switch ($conv.Directive) { "client" { "&НаКлиенте" } "servernc" { "&НаСервереБезКонтекста" } "clientservernc" { "&НаКлиентеНаСервереБезКонтекста" } default { "&НаКлиентеНаСервере" } }
+				Report-Error "29. Module.bsl line $($conv.Line): $($conv.Call) in '$($conv.Procedure)' compiled $dirName — it needs the form context on the server (&НаСервере)"
+				$conversionErrors++
+			}
+		}
+		if ($conversionErrors -eq 0) { Report-OK "29. Form data conversion: server context only" }
 	}
 }
 

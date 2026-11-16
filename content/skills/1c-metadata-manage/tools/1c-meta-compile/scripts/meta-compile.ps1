@@ -1,12 +1,20 @@
-﻿# meta-compile v1.124 — Compile 1C metadata object from JSON
+﻿# meta-compile v1.126 — Compile 1C metadata object from JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: an existing object is refused unless -Force (upstream only warns; a recompile
+# gives the object a new uuid). NEW_OBJECT_POSITION and SUPPORT_GUARD come from .dev.env
+# first (.v8-project.json is the fallback); the support guard fails closed on an
+# unreadable Ext/ParentConfigurations.bin. An object left unregistered (no
+# Configuration.xml / ChildObjects) exits 3. Batch mode re-runs the same PowerShell edition.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
 	[string]$JsonPath,
 
 	[Parameter(Mandatory)]
-	[string]$OutputDir
+	[string]$OutputDir,
+
+	# 1c-rules: an existing object is refused unless -Force (see section 16).
+	[switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,14 +24,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -36,10 +53,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	# PS 7 wraps a NON-array in a List<object> for -NoEnumerate, so the caller's
-	# $def.PSObject.Properties would list List members (Capacity, Count, …) instead of the
-	# JSON keys and every operation would be 'unknown'. Only arrays need the switch.
-	if ($parsed -is [System.Array]) { Write-Output -NoEnumerate $parsed } else { return $parsed }
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -188,6 +202,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -268,7 +284,8 @@ if ($def -is [array] -or ($null -ne $def -and $def.GetType().BaseType.Name -eq '
 		try {
 			$item | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 $tmpJson
 			$psExe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh' } else { 'powershell.exe' }
-			$proc = Start-Process -FilePath $psExe -ArgumentList "-NoProfile -File `"$PSCommandPath`" -JsonPath `"$tmpJson`" -OutputDir `"$OutputDir`"" -NoNewWindow -Wait -PassThru
+			$forceArg = if ($Force) { " -Force" } else { "" }
+			$proc = Start-Process -FilePath $psExe -ArgumentList "-NoProfile -File `"$PSCommandPath`" -JsonPath `"$tmpJson`" -OutputDir `"$OutputDir`"$forceArg" -NoNewWindow -Wait -PassThru
 			if ($proc.ExitCode -eq 0) { $batchOk++ } else { $batchFail++ }
 		} finally {
 			Remove-Item $tmpJson -Force -ErrorAction SilentlyContinue
@@ -5402,6 +5419,16 @@ $typeDir = Join-Path $OutputDir $typePlural
 # Main XML file: {OutputDir}/{TypePlural}/{Name}.xml
 $mainXmlPath = Join-Path $typeDir "$objName.xml"
 
+# 1c-rules: no silent overwrite. Recompiling an existing object replaces its file whole and
+# gives it a NEW uuid: the link to the infobase object and every reference to it (code,
+# subsystem content, attribute types) break, and files of children the new JSON does not
+# name are left orphaned. Upstream only warns (123d6e32); here it is a refusal before any
+# write, and -Force is the explicit opt-in. Existing objects are changed with meta-edit.
+if ((Test-Path -LiteralPath $mainXmlPath) -and -not $Force) {
+	[Console]::Error.WriteLine("[ERROR] $objType '$objName' already exists ($typePlural/$objName.xml). Recompiling replaces the file and gives the object a NEW uuid: the link to the infobase object and references to it break. Change an existing object with meta-edit; pass -Force only to replace it deliberately.")
+	exit 1
+}
+
 # Types that don't have subdirectory structure (no Ext/, no modules)
 $typesNoSubDir = @("DefinedType","ScheduledJob","EventSubscription")
 
@@ -5630,6 +5657,7 @@ function Write-XmlFileKeepEol([string]$path, [string]$text, $encoding) {
 # ссылки на прежний объект (из кода, состава подсистем, типов реквизитов) станут висячими.
 # Для доработки существующего объекта есть meta-edit; молчать об этом нельзя.
 if (Test-Path $mainXmlPath) {
+	# 1c-rules: reached only with -Force (refused above otherwise).
 	Write-Warning "$objType '$objName' уже существует ($typePlural/$objName.xml) — файл будет перезаписан, объект получит НОВЫЙ uuid, ссылки на прежний сломаются. Для правки существующего объекта используйте meta-edit."
 }
 
@@ -5882,6 +5910,8 @@ if ($commands -and $commands.Count -gt 0) {
 # databases[].newObjectPosition базы, чей configSrc охватывает каталог родительского XML,
 # иначе корневое поле, иначе end. Значения: end — после последнего объекта того же вида
 # (так дописывает Конфигуратор); byName — по имени среди объектов того же вида.
+# 1c-rules: источник правды — .dev.env NEW_OBJECT_POSITION; .v8-project.json остаётся
+# запасным путём апстрима — так же устроен SUPPORT_GUARD в Get-EditMode.
 # Файл ищем от рабочего каталога вверх, каталог конфигурации — запасной путь: так же
 # его ищут support-guard и группа db-*, а скрипт навыка зовут по абсолютному пути, и cwd
 # остаётся рабочим каталогом проекта.
@@ -5890,15 +5920,14 @@ if ($commands -and $commands.Count -gt 0) {
 function Get-NewObjectPosition([string]$cfgDir) {
 	try {
 		if (-not $cfgDir) { $cfgDir = "." }
-		# 1c-rules: .dev.env NEW_OBJECT_POSITION wins over .v8-project.json newObjectPosition.
-		# A value that is SET (non-empty) decides on its own — the fallback file is not consulted.
-		# An unrecognized value is the documented default `end`, not "as if unset": otherwise a
-		# typo would silently hand the ordering over to the fallback file. Empty / missing key
-		# gives '' from the helper, and upstream's registry path stays in force.
 		$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
 		if (Test-Path $__devEnvHelper) {
 		    . $__devEnvHelper
 		    $__devEnvPos = (Get-1CDevEnvValue 'NEW_OBJECT_POSITION')
+		    # Значение ЗАДАНО (непусто) → .dev.env решает, .v8-project.json ниже не спрашиваем.
+		    # Нераспознанное значение = документированный дефолт end, а не «как будто не задано»:
+		    # иначе опечатка молча уводила бы порядок в настройку запасного файла.
+		    # Пусто / ключа нет → '' от хелпера, и запасной путь апстрима остаётся в силе.
 		    if ($__devEnvPos) {
 		        if ($__devEnvPos.ToLower() -eq 'byname') { return "byName" }
 		        return "end"

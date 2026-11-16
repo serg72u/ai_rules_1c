@@ -1,5 +1,11 @@
-﻿# mxl-compile v1.59 — Compile 1C spreadsheet from JSON
+﻿# mxl-compile v1.61 — Compile 1C spreadsheet from JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: the support guard takes its reaction from .dev.env SUPPORT_GUARD first and fails
+#        closed on an unreadable Ext/ParentConfigurations.bin (see the guard block below).
+# Local: the guard runs before the destination directory is created, so a refusal leaves
+#        nothing behind.
+# Local: printSettings is written where the platform writes it (after namedItem); 'control'
+#        must be the base64 settings blob, a control kind there is refused.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
@@ -16,14 +22,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -36,7 +51,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	Write-Output -NoEnumerate $parsed
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -175,6 +190,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -985,6 +1002,20 @@ function Get-CellValueProps {
 	if ($null -ne $cell.text -or $null -ne $cell.template) {
 		[Console]::Error.WriteLine("Cell with 'valueType' cannot have 'text' or 'template' ($where)")
 		exit 1
+	}
+	# Local: 'control' carries the platform's serialized control settings (base64), written by
+	# mxl-decompile. A control kind there ("checkbox") is valid base64 and went into the XML as
+	# garbage settings; the kind belongs in 'controlType'.
+	if ($null -ne $cell.control -and "$($cell.control)" -ne '') {
+		$ctlRaw = "$($cell.control)"
+		$ctlNorm = ($ctlRaw -replace '\s', '').ToLowerInvariant()
+		$ctlOk = $true
+		if (@('input', 'checkbox', 'none') -contains $ctlNorm -or $script:valueControlSynonyms.ContainsKey($ctlNorm)) { $ctlOk = $false }
+		else { try { [void][Convert]::FromBase64String($ctlRaw) } catch { $ctlOk = $false } }
+		if (-not $ctlOk) {
+			[Console]::Error.WriteLine("Cell 'control' must be the base64 settings blob kept by mxl-decompile, got `"$ctlRaw`" ($where). The control kind goes into 'controlType': input, checkbox")
+			exit 1
+		}
 	}
 	$props['containsValue'] = 'true'
 	# Пустая строка — третье состояние: <containsValue> есть, тип не задан (<valueType/>).
@@ -2571,8 +2602,6 @@ X "`t<vgRows>$docHeight</vgRows>"
 Emit-Groups 'vg' $rowGroups
 Emit-Groups 'hg' $colGroups
 
-Emit-PrintSettings $def.printSettings
-
 # 7f. Merges
 foreach ($m in $merges) {
 	X "`t<merge>"
@@ -2626,6 +2655,11 @@ foreach ($ni in $sortedNamedItems) {
 	X "`t`t</area>"
 	X "`t</namedItem>"
 }
+
+# Local: printSettings goes after the named items, before the line palette - the place 8.3.27
+# writes it (EPF build + dump, 2026-11-01). Upstream wrote it before <merge>; its only platform
+# fixture with print settings has neither merges nor named items, so the two orders agreed there.
+Emit-PrintSettings $def.printSettings
 
 # 7h. Line palette
 foreach ($ln in $script:lineRegistry) {
@@ -2724,9 +2758,10 @@ $resolvedPath = if ([System.IO.Path]::IsPathRooted($OutputPath)) { $OutputPath }
 # Каталог назначения создаём сами: типовой путь — Templates/<Имя>/Ext/Template.xml,
 # и его может ещё не быть. Так делают и form-compile, и skd-compile, и py-порт этого
 # навыка; без этого PS-порт падал на «Could not find a part of the path».
+# Local: the support guard decides first — a refused write must not leave a new directory.
+Assert-EditAllowed $resolvedPath 'editable'
 $outDir = [System.IO.Path]::GetDirectoryName($resolvedPath)
 if ($outDir -and -not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
-Assert-EditAllowed $resolvedPath 'editable'
 [System.IO.File]::WriteAllText($resolvedPath, $xml.ToString().TrimEnd("`r", "`n"), $enc)
 
 # --- 9. Summary ---

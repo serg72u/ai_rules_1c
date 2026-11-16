@@ -1,8 +1,9 @@
-﻿# cfe-validate v1.31 — Validate 1C configuration extension structure (CFE)
+﻿# cfe-validate v1.34 — Validate 1C configuration extension structure (CFE)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
-# Local: a borrowed form may have no Module.bsl; check 12 reports a missing CommonPicture or
-#        a StyleItem outside the platform style list as an error.
-[CmdletBinding(PositionalBinding=$false)]
+# Local: check 11 does not warn about a missing Module.bsl of a borrowed form (object or common):
+#        cfe-borrow writes none, as Configurator 2.20 does; an own form still needs one.
+# Local: check 12 reports a missing CommonPicture or a StyleItem outside the platform style list as
+#        an error (the platform refuses to load the form); a missing enum value stays a warning.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory, Position=0)]
@@ -85,6 +86,7 @@ $finalize = {
 		$result = "=== Validation OK: Extension.$objName ($checks checks) ==="
 	} else {
 		Out-Line ""
+		if ($script:stopped -and $script:errors -ge $MaxErrors) { Out-Line "Stopped after $MaxErrors errors. Fix and re-run." }
 		Out-Line "=== Result: $($script:errors) errors, $($script:warnings) warnings ($checks checks) ==="
 		$result = $script:output.ToString()
 	}
@@ -890,15 +892,20 @@ function Validate-BorrowedSubItem {
 		$ok = $false
 	}
 	$subExt = $subProps.SelectSingleNode("md:ExtendedConfigurationObject", $nsm)
-	if (-not $subExt -or -not $subExt.InnerText) {
-		Report-Error "${checkNum}. ${context}: ${subType}.$($subName.InnerText) missing ExtendedConfigurationObject"
-		$ok = $false
+	if (-not $subExt) {
+		$subNameVal = if ($subName) { $subName.InnerText } else { "?" }
+		$script:noLinkItems.Add("${context}.${subType}.${subNameVal}")
 	} elseif ($subExt.InnerText -notmatch $guidPattern) {
 		Report-Error "${checkNum}. ${context}: ${subType}.$($subName.InnerText) invalid ExtendedConfigurationObject"
 		$ok = $false
 	}
 	return $ok
 }
+
+# Заимствованные элементы без ExtendedConfigurationObject (проверки 9–11). Платформа такие принимает и
+# связывает по имени, но штатно элемент пишется всегда: без него не видно, что объект источника
+# пересоздан, — расширение молча прицепится к новому (замер 8.3.23–8.5.1). Итог — одно предупреждение.
+$script:noLinkItems = New-Object System.Collections.Generic.List[string]
 
 if ($childObjNode) {
 	$borrowedCount = 0
@@ -956,9 +963,9 @@ if ($childObjNode) {
 			$borrowedCount++
 
 			$extObj = $objProps.SelectSingleNode("md:ExtendedConfigurationObject", $objNs)
-			if (-not $extObj -or -not $extObj.InnerText) {
-				Report-Error "9. Borrowed ${typeName}.${childName}: missing ExtendedConfigurationObject"
-				$check9Ok = $false
+			if (-not $extObj) {
+				$script:noLinkItems.Add("${typeName}.${childName}")
+				$borrowedOk++
 			} elseif ($extObj.InnerText -notmatch $guidPattern) {
 				Report-Error "9. Borrowed ${typeName}.${childName}: invalid ExtendedConfigurationObject UUID '$($extObj.InnerText)'"
 				$check9Ok = $false
@@ -979,19 +986,9 @@ if ($childObjNode) {
 					}
 				}
 				$missingCats = @($expectedCats | Where-Object { -not $foundCats.ContainsKey($_) })
-				$presentCats = @($expectedCats | Where-Object { $foundCats.ContainsKey($_) })
 				if ($missingCats.Count -gt 0) {
-					# Local: a shell borrowed by `cfe-borrow` v1.12 declares only the Object category — no Ref /
-					# Selection / List / Manager. The platform loads such an extension (our borrow-then-load runs on
-					# 8.3.27 prove it), so a hard error here failed every borrow of the older tool. What the platform
-					# really refuses is a *partially* written set of the reference categories: that stays an error.
-					$legacyShape = ($presentCats.Count -eq 0) -or (($presentCats.Count -eq 1) -and ($presentCats[0] -eq 'Object'))
-					if ($legacyShape) {
-						Report-Warn "9. Borrowed ${typeName}.${childName}: GeneratedType has no Ref/Selection/List/Manager yet (a shell from an older cfe-borrow; Configurator writes $($expectedCats -join ', '))"
-					} else {
-						Report-Error "9. Borrowed ${typeName}.${childName}: missing GeneratedType categor$(if ($missingCats.Count -eq 1) { 'y' } else { 'ies' }) $($missingCats -join ', ')"
-						$check9Ok = $false
-					}
+					Report-Error "9. Borrowed ${typeName}.${childName}: missing GeneratedType categor$(if ($missingCats.Count -eq 1) { 'y' } else { 'ies' }) $($missingCats -join ', ')"
+					$check9Ok = $false
 				}
 			}
 		} else {
@@ -1214,8 +1211,10 @@ foreach ($fi in $script:formList) {
 					# У общей формы это описание самого объекта — его уже проверила проверка 9
 					if ($isBorrowed -and -not $fi.IsCommon) {
 						$fmExt = $fmProps.SelectSingleNode("md:ExtendedConfigurationObject", $fmNs)
-						if (-not $fmExt -or $fmExt.InnerText -notmatch $guidPattern) {
-							Report-Error "11. ${ctx}: invalid/missing ExtendedConfigurationObject"
+						if (-not $fmExt) {
+							$script:noLinkItems.Add($ctx)
+						} elseif ($fmExt.InnerText -notmatch $guidPattern) {
+							Report-Error "11. ${ctx}: invalid ExtendedConfigurationObject"
 							$check11Ok = $false
 						}
 					}
@@ -1269,6 +1268,12 @@ if ($formCount -eq 0) {
 	Report-OK "11. Borrowed forms: $formCount validated ($bfCount with BaseForm)"
 }
 
+if ($script:noLinkItems.Count -gt 0) {
+	$shown = ($script:noLinkItems | Select-Object -First 5) -join ", "
+	if ($script:noLinkItems.Count -gt 5) { $shown += ", …" }
+	Report-Warn "9. $($script:noLinkItems.Count) borrowed element(s) without ExtendedConfigurationObject ($shown): the platform binds them by name only, so a recreated source object is picked up silently — re-borrow them to restore the link"
+}
+
 if ($script:stopped) { & $finalize; exit 1 }
 
 # --- Check 12: Form dependency references ---
@@ -1283,6 +1288,7 @@ $platformStyleItems = @{
 	"SmallTextFont"=$true; "ExtraLargeTextFont"=$true; "LargeTextFont"=$true
 	"NormalTextColor"=$true; "GroupHeaderBackColor"=$true; "GroupHeaderFont"=$true
 	"ErrorColor"=$true; "SuccessColor"=$true; "WarningColor"=$true
+	"FieldSelectionBackColor"=$true; "ReportGroup1BackColor"=$true; "ReportGroup2BackColor"=$true
 }
 $check12Ok = $true
 $depCheckCount = 0
@@ -1339,94 +1345,53 @@ foreach ($bf in $script:borrowedFormsWithTree) {
 		}
 	}
 
-		# Корень путей формы — имя её основного реквизита: «Объект» только у формы объекта, у формы
-	# списка «Список», у формы записи регистра «Запись». С зашитым «Объект» обе проверки ниже на
-	# таких формах молча не срабатывали. Ищем сначала в <Attributes> самой формы, потом в <BaseForm>.
-	$rootName = ""
-	$rootMatch = [regex]::Match($raw, $script:mainAttrPattern)
-	if ($rootMatch.Success) { $rootName = $rootMatch.Groups[1].Value }
-
-	# <AdditionalColumns table="Объект.X"> — доп. колонки табличной части, объявленные в самой форме.
-	# Колонки есть, а самой ТЧ в расширении нет (ни заимствованной, ни собственной) → платформа
-	# отвергает загрузку: «Неверный путь к данным» плюс «Колонки не могут быть добавлены к реквизиту».
-	# Только своя часть формы: <BaseForm> — снимок исходной формы, его платформа разрешает по конфигурации.
-	$acTables = @{}
-	if ($rootName) {
-		$rootPat = [regex]::Escape($rootName)
-		$ownPart = ($raw -split '<BaseForm', 2)[0]
-		foreach ($m in [regex]::Matches($ownPart, "<AdditionalColumns table=`"${rootPat}\.(\w+)`"")) {
-			$acTables[$m.Groups[1].Value] = $true
-		}
-	}
-	# Соседние проверки этого блока эвристичны (имя стиля добывается регуляркой), поэтому там
-	# предупреждение. Здесь сигнал точный — имя ТЧ берётся из атрибута, — а последствие жёсткое,
-	# поэтому ошибка. ТЧ ищется у объекта основного реквизита; типа у реквизита нет — у владельца формы;
-	# тип не объект метаданных (таблица значений, список) — ТЧ объекта тут ни при чём. Объекта основного
-	# реквизита в расширении нет — об этом скажет проверка 14, здесь бы вышла ложная подсказка про ТЧ.
-	$acTarget = Get-MainAttributeTarget $rootMatch.Value
-	$ownerKey = $null
-	if ($acTarget) {
-		if ($script:extObjIndex.ContainsKey($acTarget.Key)) { $ownerKey = $acTarget.Key }
-	} elseif ($rootMatch.Value -notmatch '<v8:Type' -and $bf.OwnerKey) {
-		$ownerKey = $bf.OwnerKey
-	}
-	if ($acTables.Count -gt 0 -and $ownerKey) {
-		$ownerEntry = $script:extObjIndex[$ownerKey]
-		foreach ($tblName in $acTables.Keys) {
-			$depCheckCount++
-			if (-not $ownerEntry -or -not $ownerEntry.TSColumns.ContainsKey($tblName)) {
-				Report-Error "12. ${ctx}: <AdditionalColumns table=`"${rootName}.${tblName}`"> — TabularSection.${tblName} is neither borrowed nor added in extension"
-				$check12Ok = $false
-			}
-		}
-	}
-
-		# Корень путей формы — имя её основного реквизита: «Объект» только у формы объекта, у формы
-	# списка «Список», у формы записи регистра «Запись». С зашитым «Объект» обе проверки ниже на
-	# таких формах молча не срабатывали. Ищем сначала в <Attributes> самой формы, потом в <BaseForm>.
-	$rootName = ""
-	$rootMatch = [regex]::Match($raw, $script:mainAttrPattern)
-	if ($rootMatch.Success) { $rootName = $rootMatch.Groups[1].Value }
-
-	# <AdditionalColumns table="Объект.X"> — доп. колонки табличной части, объявленные в самой форме.
-	# Колонки есть, а самой ТЧ в расширении нет (ни заимствованной, ни собственной) → платформа
-	# отвергает загрузку: «Неверный путь к данным» плюс «Колонки не могут быть добавлены к реквизиту».
-	# Только своя часть формы: <BaseForm> — снимок исходной формы, его платформа разрешает по конфигурации.
-	$acTables = @{}
-	if ($rootName) {
-		$rootPat = [regex]::Escape($rootName)
-		$ownPart = ($raw -split '<BaseForm', 2)[0]
-		foreach ($m in [regex]::Matches($ownPart, "<AdditionalColumns table=`"${rootPat}\.(\w+)`"")) {
-			$acTables[$m.Groups[1].Value] = $true
-		}
-	}
-	# Соседние проверки этого блока эвристичны (имя стиля добывается регуляркой), поэтому там
-	# предупреждение. Здесь сигнал точный — имя ТЧ берётся из атрибута, — а последствие жёсткое,
-	# поэтому ошибка. ТЧ ищется у объекта основного реквизита; типа у реквизита нет — у владельца формы;
-	# тип не объект метаданных (таблица значений, список) — ТЧ объекта тут ни при чём. Объекта основного
-	# реквизита в расширении нет — об этом скажет проверка 14, здесь бы вышла ложная подсказка про ТЧ.
-	$acTarget = Get-MainAttributeTarget $rootMatch.Value
-	$ownerKey = $null
-	if ($acTarget) {
-		if ($script:extObjIndex.ContainsKey($acTarget.Key)) { $ownerKey = $acTarget.Key }
-	} elseif ($rootMatch.Value -notmatch '<v8:Type' -and $bf.OwnerKey) {
-		$ownerKey = $bf.OwnerKey
-	}
-	if ($acTables.Count -gt 0 -and $ownerKey) {
-		$ownerEntry = $script:extObjIndex[$ownerKey]
-		foreach ($tblName in $acTables.Keys) {
-			$depCheckCount++
-			if (-not $ownerEntry -or -not $ownerEntry.TSColumns.ContainsKey($tblName)) {
-				Report-Error "12. ${ctx}: <AdditionalColumns table=`"${rootName}.${tblName}`"> — TabularSection.${tblName} is neither borrowed nor added in extension"
-				$check12Ok = $false
-			}
-		}
-	}
-
 	foreach ($mi in $missingErrors) {
 		Report-Error "12. ${ctx}: references ${mi} not borrowed in extension (the platform refuses to load the form)"
 		$check12Ok = $false
 	}
+
+		# Корень путей формы — имя её основного реквизита: «Объект» только у формы объекта, у формы
+	# списка «Список», у формы записи регистра «Запись». С зашитым «Объект» обе проверки ниже на
+	# таких формах молча не срабатывали. Ищем сначала в <Attributes> самой формы, потом в <BaseForm>.
+	$rootName = ""
+	$rootMatch = [regex]::Match($raw, $script:mainAttrPattern)
+	if ($rootMatch.Success) { $rootName = $rootMatch.Groups[1].Value }
+
+	# <AdditionalColumns table="Объект.X"> — доп. колонки табличной части, объявленные в самой форме.
+	# Колонки есть, а самой ТЧ в расширении нет (ни заимствованной, ни собственной) → платформа
+	# отвергает загрузку: «Неверный путь к данным» плюс «Колонки не могут быть добавлены к реквизиту».
+	# Только своя часть формы: <BaseForm> — снимок исходной формы, его платформа разрешает по конфигурации.
+	$acTables = @{}
+	if ($rootName) {
+		$rootPat = [regex]::Escape($rootName)
+		$ownPart = ($raw -split '<BaseForm', 2)[0]
+		foreach ($m in [regex]::Matches($ownPart, "<AdditionalColumns table=`"${rootPat}\.(\w+)`"")) {
+			$acTables[$m.Groups[1].Value] = $true
+		}
+	}
+	# Соседние проверки этого блока эвристичны (имя стиля добывается регуляркой), поэтому там
+	# предупреждение. Здесь сигнал точный — имя ТЧ берётся из атрибута, — а последствие жёсткое,
+	# поэтому ошибка. ТЧ ищется у объекта основного реквизита; типа у реквизита нет — у владельца формы;
+	# тип не объект метаданных (таблица значений, список) — ТЧ объекта тут ни при чём. Объекта основного
+	# реквизита в расширении нет — об этом скажет проверка 14, здесь бы вышла ложная подсказка про ТЧ.
+	$acTarget = Get-MainAttributeTarget $rootMatch.Value
+	$ownerKey = $null
+	if ($acTarget) {
+		if ($script:extObjIndex.ContainsKey($acTarget.Key)) { $ownerKey = $acTarget.Key }
+	} elseif ($rootMatch.Value -notmatch '<v8:Type' -and $bf.OwnerKey) {
+		$ownerKey = $bf.OwnerKey
+	}
+	if ($acTables.Count -gt 0 -and $ownerKey) {
+		$ownerEntry = $script:extObjIndex[$ownerKey]
+		foreach ($tblName in $acTables.Keys) {
+			$depCheckCount++
+			if (-not $ownerEntry -or -not $ownerEntry.TSColumns.ContainsKey($tblName)) {
+				Report-Error "12. ${ctx}: <AdditionalColumns table=`"${rootName}.${tblName}`"> — TabularSection.${tblName} is neither borrowed nor added in extension"
+				$check12Ok = $false
+			}
+		}
+	}
+
 	foreach ($mi in $missingItems) {
 		Report-Warn "12. ${ctx}: references ${mi} not borrowed in extension"
 		$check12Ok = $false
@@ -1841,6 +1806,15 @@ function Get-MdIdValue {
 	return $el.GetAttribute("uuid")
 }
 
+# Заимствованный элемент расширения попадает в индекс и без ExtendedConfigurationObject — со значением
+# $null: платформа связывает его по имени, и наличие в источнике с точным именем сверяется всё равно.
+function Test-AdoptedMdEl {
+	param($el, [bool]$fromExtension)
+	if (-not $fromExtension) { return $false }
+	$ob = $el.SelectSingleNode("*[local-name()='Properties']/*[local-name()='ObjectBelonging']")
+	return [bool]($ob -and $ob.InnerText.Trim() -eq 'Adopted')
+}
+
 # Подобъекты, у которых в ChildObjects владельца только имя, а описание — в отдельном файле
 # <каталог владельца>/<Имя владельца>/<Каталог>/<Имя>.xml.
 $nestedFileDirs = @{ "Form"="Forms"; "Template"="Templates"; "Subsystem"="Subsystems"; "Recalculation"="Recalculations" }
@@ -1860,7 +1834,7 @@ function Add-MdIdFile {
 	}
 	if (-not $objEl) { return $false }
 	$v = Get-MdIdValue $objEl $fromExtension
-	if ($v) { $idx[$key] = $v }
+	if ($v -or (Test-AdoptedMdEl $objEl $fromExtension)) { $idx[$key] = $v }
 	$ownDir = Join-Path (Split-Path $objFile -Parent) ([System.IO.Path]::GetFileNameWithoutExtension($objFile))
 	Add-MdIdEntries $idx $objEl $key $fromExtension $ownDir
 	return $true
@@ -1879,7 +1853,7 @@ function Add-MdIdEntries {
 		if ($nameNode) {
 			$key = "$prefix.$($sub.LocalName).$($nameNode.InnerText.Trim())"
 			$v = Get-MdIdValue $sub $fromExtension
-			if ($v) { $idx[$key] = $v }
+			if ($v -or (Test-AdoptedMdEl $sub $fromExtension)) { $idx[$key] = $v }
 			Add-MdIdEntries $idx $sub $key $fromExtension ""
 		} elseif ($ownDir -and $nestedFileDirs.ContainsKey($sub.LocalName) -and $sub.InnerText.Trim()) {
 			$subName = $sub.InnerText.Trim()
@@ -1897,6 +1871,35 @@ function Get-MdIdIndex {
 	$idx = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
 	if (-not (Add-MdIdFile $idx (Join-Path $typeDir "$objName.xml") "$typeName.$objName" $fromExtension)) { return $null }
 	return $idx
+}
+
+# Имя объекта по его описанию в источнике; файл ищется без учёта регистра. Ключи индекса строятся из
+# имени в расширении, а на Windows файл источника находится и при другом регистре — без этой сверки
+# расхождение имени самого объекта не видно. $null — файла нет или он не читается.
+function Get-SourceObjectName {
+	param([string]$typeDir, [string]$objName)
+	$f = Join-Path $typeDir "$objName.xml"
+	if (-not (Test-Path -LiteralPath $f)) {
+		if (-not (Test-Path -LiteralPath $typeDir)) { return $null }
+		# -Filter на Windows ловит и «.xmlbak» через короткие имена 8.3 — расширение сверяем явно
+		$twin = Get-ChildItem -LiteralPath $typeDir -Filter "*.xml" -File |
+			Where-Object { $_.Extension -ieq ".xml" -and [string]::Equals($_.BaseName, $objName, [StringComparison]::OrdinalIgnoreCase) } |
+			Sort-Object Name |
+			Select-Object -First 1
+		if (-not $twin) { return $null }
+		$f = $twin.FullName
+	}
+	try {
+		$doc = New-Object System.Xml.XmlDocument
+		$doc.Load($f)
+	} catch { return $null }
+	foreach ($c in $doc.DocumentElement.ChildNodes) {
+		if ($c.NodeType -ne 'Element') { continue }
+		$n = $c.SelectSingleNode("*[local-name()='Properties']/*[local-name()='Name']")
+		if ($n) { return $n.InnerText.Trim() }
+		return $null
+	}
+	return $null
 }
 
 # Собственные подобъекты заимствованного объекта, одноимённые (без учёта регистра) с незаимствованным
@@ -1920,7 +1923,8 @@ function Get-OwnNameCollisions {
 	foreach ($sub in $co.ChildNodes) {
 		if ($sub.NodeType -ne 'Element') { continue }
 		if ($sub.LocalName -in @('Form','Template')) {
-			# Собственная форма или макет — файл есть и в нём нет ExtendedConfigurationObject. Нет файла или
+			# Собственная форма или макет — файл есть и в нём нет ни ObjectBelonging=Adopted, ни
+			# ExtendedConfigurationObject (у заимствованной формы последнего может не быть). Нет файла или
 			# не читается — не судим (об отсутствии файла формы говорит проверка 10)
 			$fName = $sub.InnerText.Trim()
 			if (-not $fName) { continue }
@@ -1929,6 +1933,7 @@ function Get-OwnNameCollisions {
 			$fDoc = New-Object System.Xml.XmlDocument
 			try { $fDoc.Load($fFile) } catch { continue }
 			if ($fDoc.SelectSingleNode("//*[local-name()='Properties']/*[local-name()='ExtendedConfigurationObject']")) { continue }
+			if ($fDoc.SelectSingleNode("//*[local-name()='Properties']/*[local-name()='ObjectBelonging' and normalize-space()='Adopted']")) { continue }
 			$keys += "$prefix.$($sub.LocalName).$fName"
 			continue
 		}
@@ -2012,6 +2017,13 @@ if (-not $script:stopped -and $childObjNode) {
 			continue
 		}
 
+		$srcName = Get-SourceObjectName (Join-Path $srcRoot $dirName) $objName18
+		# Только расхождение регистра: имя, отличающееся иначе (файл назван не по объекту), — не наш случай
+		if ($srcName -and $srcName -cne $objName18 -and [string]::Equals($srcName, $objName18, [StringComparison]::OrdinalIgnoreCase)) {
+			Report-Error "18. ${typeName}.${objName18}: the source configuration has this name in a different case (${typeName}.${srcName}) — the platform rejects the extension («контролируемое свойство Имя не совпадает»)"
+			$check18Ok = $false
+			continue
+		}
 		$srcIdx = Get-MdIdIndex (Join-Path $srcRoot $dirName) $typeName $objName18 $false
 		if ($null -eq $srcIdx) {
 			Report-Error "18. ${typeName}.${objName18}: borrowed object is missing from the source configuration ($dirName/$objName18.xml)"
@@ -2019,8 +2031,9 @@ if (-not $script:stopped -and $childObjNode) {
 			continue
 		}
 		foreach ($key in $extIdx.Keys) {
-			$check18Count++
 			$extId = $extIdx[$key]
+			# В итог «связи совпадают» — только сверенные UUID; о незаданных сказала проверка 9
+			if ($extId) { $check18Count++ }
 			if (-not $srcIdx.Contains($key)) {
 				$caseTwin = $null
 				foreach ($sk in $srcIdx.Keys) {
@@ -2032,7 +2045,7 @@ if (-not $script:stopped -and $childObjNode) {
 					Report-Error "18. ${key}: borrowed sub-object is missing from the source configuration"
 				}
 				$check18Ok = $false
-			} elseif ($extId.ToLowerInvariant() -cne $srcIdx[$key].ToLowerInvariant()) {
+			} elseif ($extId -and $extId.ToLowerInvariant() -cne $srcIdx[$key].ToLowerInvariant()) {
 				$what = if ($extId -ceq $zeroGuid) { "zero" } else { "$extId" }
 				Report-Error "18. ${key}: ExtendedConfigurationObject is $what, but the UUID in the source configuration is $($srcIdx[$key]) — the platform loads the extension but does not apply it («ОбъектРасширяемойКонфигурации не совпадает»)"
 				$check18Ok = $false

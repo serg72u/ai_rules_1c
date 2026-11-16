@@ -1,5 +1,9 @@
 ﻿# template-add v1.30 — Add template to 1C object (+write_xml_file/write_utf8_bom: общий эталон записи)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: .dev.env SUPPORT_GUARD first (fail-closed on an unreadable bin); -ObjectName also takes an
+#   absolute or relative object XML path (Local fix 2026-09-13); PositionalBinding=$false as in
+#   every other writing tool (upstream left this one out).
+[CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
 	[Alias("ProcessorName")]
@@ -74,8 +78,6 @@ function Get-EditMode([string]$cfgDir) {
 		}
 		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
-		$pj = Find-V8Project (Get-Location).ProviderPath
-		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return 'deny' }
 		# UTF-8 явно: PS 5.1 читает файл без BOM как ANSI, и configSrc с кириллицей не совпал бы
 		$proj = Get-Content -Raw -Encoding UTF8 $pj | ConvertFrom-Json
@@ -126,6 +128,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -211,6 +215,9 @@ $objectTypeFolders = @(
 	"BusinessProcesses", "Tasks", "ExchangePlans"
 )
 
+# Local: -ObjectName may be the object XML itself (absolute, or relative to the working
+# directory or SrcDir); SrcDir then becomes the object's folder. A bare name keeps the
+# upstream lookup below.
 $isObjectPath = $ObjectName.EndsWith('.xml', [StringComparison]::OrdinalIgnoreCase)
 if ($isObjectPath) {
 	$rootXmlPath = $ObjectName
@@ -221,7 +228,7 @@ if ($isObjectPath) {
 		Write-Error "Корневой файл объекта не найден: $rootXmlPath"
 		exit 1
 	}
-	$rootXmlPath = (Resolve-Path -LiteralPath $rootXmlPath).Path
+	$rootXmlPath = (Resolve-Path -LiteralPath $rootXmlPath).ProviderPath
 	$SrcDir = Split-Path $rootXmlPath -Parent
 	$ObjectName = [System.IO.Path]::GetFileNameWithoutExtension($rootXmlPath)
 } else {

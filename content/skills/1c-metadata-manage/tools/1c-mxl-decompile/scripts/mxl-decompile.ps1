@@ -1,5 +1,8 @@
 ﻿# mxl-decompile v1.32 — Decompile 1C spreadsheet to JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: a layout with a single row (or column) group decompiles - see Read-Groups call site.
+# Local (2026-11-16): without -OutputPath stdout is the JSON alone - the statistics lines are
+# printed only with -OutputPath (Write-Host reaches stdout under powershell.exe -File).
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
@@ -454,8 +457,11 @@ function Read-Groups {
 	return @($out)
 }
 
-$rowGroups = Read-Groups 'vg' 'rows'
-$colGroups = Read-Groups 'hg' 'cols'
+# Local: @() at the call site. The function's own @($out) is unrolled on return, so a single
+# group came back as a bare dictionary and `$rowGroups + $colGroups` below threw
+# "A hash table can only be added to another hash table" (one row group, no column groups).
+$rowGroups = @(Read-Groups 'vg' 'rows')
+$colGroups = @(Read-Groups 'hg' 'cols')
 
 # --- 5. Extract columns and default width ---
 
@@ -1777,9 +1783,10 @@ if ($OutputPath) {
 		$enc
 	)
 	Write-Host "[OK] Decompiled: $OutputPath"
+	Write-Host "     Areas: $($namedAreas.Count), Rows: $($rowData.Count), Columns: $totalColumns" -ForegroundColor DarkGray
+	Write-Host "     Fonts: $($fontDefs.Count), Styles: $($styleDefs.Count), Merges: $($mergeMap.Count)" -ForegroundColor DarkGray
 } else {
+	# Без -OutputPath stdout — только JSON: Write-Host при powershell.exe -File тоже уходит в stdout,
+	# и строки статистики после JSON ломали разбор у вызывающего (json.loads: Extra data).
 	Write-Output $json
 }
-
-Write-Host "     Areas: $($namedAreas.Count), Rows: $($rowData.Count), Columns: $totalColumns" -ForegroundColor DarkGray
-Write-Host "     Fonts: $($fontDefs.Count), Styles: $($styleDefs.Count), Merges: $($mergeMap.Count)" -ForegroundColor DarkGray

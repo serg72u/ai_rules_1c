@@ -1,5 +1,12 @@
 ﻿# epf-build v1.26 — Build external data processor or report (EPF/ERF) from XML sources
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local (1c-rules): .dev.env first — PLATFORM_PATH (an install dir resolves to bin\1cv8.exe) before
+#   the v8path of the .v8-project.json record / root, PLATFORM_ARGS / IBCMD_ARGS before v8args /
+#   ibcmdargs, the .dev.env directory is a project root for relative infobase paths;
+#   /ConfigurationRepositoryP is masked like /P.
+#   Every Designer launch passes /DumpResult and fails on a non-zero or missing result (Get-DumpResultError).
+#   Source pre-check: /DumpResult on /CheckConfig; common modules from .dev.env EXPORT_PATH before
+#   the registry configSrc; the printed check command line is masked; the stub runs under pwsh on Core.
 # NB: *nix-раскладку платформы (/opt/1cv8/<ver>/1cv8, без .exe) знает только .py-порт — PS на *nix не исполняется.
 <#
 .SYNOPSIS
@@ -34,7 +41,12 @@
     Путь к выходному EPF/ERF-файлу
 
 .PARAMETER ConfigSrc
-    Каталог XML-выгрузки целевой конфигурации (общие модули для проверки исходников)
+    Каталог XML-выгрузки целевой конфигурации (общие модули для проверки исходников).
+    Без параметра — EXPORT_PATH из .dev.env, затем configSrc базы из .v8-project.json.
+
+.PARAMETER Checks
+    Проверка исходников перед сборкой: modules, handlers, unreferenced, empty-handlers, config
+    через запятую; off — без проверки. По умолчанию modules,handlers.
 
 .PARAMETER AdditionalV8Arguments
     Дополнительные аргументы запуска 1cv8.exe (например /UseHwLicenses+)
@@ -84,7 +96,7 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$Context,
     # Выгрузка конфигурации, в которой будет работать обработка: её общие модули видны проверке.
-    # Без параметра берётся configSrc базы из .v8-project.json.
+    # Без параметра — EXPORT_PATH из .dev.env, затем configSrc базы из .v8-project.json.
     [Parameter(Mandatory=$false)]
     [string]$ConfigSrc,
 
@@ -135,7 +147,7 @@ $script:IbcmdOwnedKeys = @(
     '--import', '--export', '--apply', '--force', '--create-database',
     '--user', '--password'
 )
-$script:V8SecretKeys = @('/P', '/UC', '/WSP', '/AWSP')
+$script:V8SecretKeys = @('/P', '/UC', '/WSP', '/AWSP', '/ConfigurationRepositoryP')
 $script:IbcmdSecretKeys = @('--password', '--token', '--db-pwd')
 
 function Test-ArgKeyMatch {
@@ -160,7 +172,6 @@ function Get-ProjectExtraArgs {
         $__devEnvArgs = @(Get-1CDevEnvArgs $__devEnvKey)
         if ($__devEnvArgs.Count -gt 0) { return $__devEnvArgs }
     }
-    $dir = (Get-Location).ProviderPath
     $dir = (Get-Location).ProviderPath
     while ($dir) {
         $pf = Join-Path $dir ".v8-project.json"
@@ -302,7 +313,8 @@ function Resolve-InfoBasePath {
         $base = $cwd
         $d = $cwd
         for ($i = 0; $i -lt 20 -and $d; $i++) {
-            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            # 1c-rules: the project root is the nearest directory with .dev.env or .v8-project.json.
+            if ((Test-Path -LiteralPath (Join-Path $d ".dev.env")) -or (Test-Path -LiteralPath (Join-Path $d ".v8-project.json"))) { $base = $d; break }
             $parent = [System.IO.Path]::GetDirectoryName($d)
             if ($parent -eq $d) { break }
             $d = $parent
@@ -395,19 +407,15 @@ function Find-ProjectDatabase {
 
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    # 1c-rules: .dev.env is this project's single source of truth — it wins over
-    # .v8-project.json, which stays supported as the upstream fallback below.
+    # 1c-rules: -V8Path (caller) -> .dev.env PLATFORM_PATH -> v8path of the matching .v8-project.json
+    # database record -> root v8path -> auto-detect. .dev.env is this project's single source of
+    # truth; .v8-project.json stays supported as the upstream fallback below.
     $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
     if (Test-Path $__devEnvHelper) {
         . $__devEnvHelper
         $__devEnvV8 = Get-1CDevEnvValue 'PLATFORM_PATH'
         if ($__devEnvV8) { return $__devEnvV8 }
     }
-    # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
-    # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
-    $dbRec = Find-ProjectDatabase
-    if ($dbRec -and $dbRec.v8path) { return [string]$dbRec.v8path }
-    $dir = (Get-Location).ProviderPath
     # v8path записи базы сильнее корневого: в одном проекте базы живут на разных версиях
     # платформы, а версию формата выгрузки задаёт та платформа, которая выгружает.
     $dbRec = Find-ProjectDatabase
@@ -700,6 +708,22 @@ function Write-PlatformOutput {
     Write-Host "--- End ---"
 }
 
+# 1c-rules: batch verdict. /DumpResult receives the result of the batch command (0 = success).
+# Read it before trusting exit code 0: a batch command can fail while 1cv8 exits 0, and a missing
+# file means the command never completed (content/rules/designer-batch-checks.md -> The verdict is
+# three signals). Returns '' on success, otherwise the reason to report.
+function Get-DumpResultError {
+    param([string]$ResultFile)
+    $code = ''
+    if ($ResultFile -and (Test-Path -LiteralPath $ResultFile)) {
+        $text = Get-Content -LiteralPath $ResultFile -Raw -ErrorAction SilentlyContinue
+        if ($text) { $code = ($text -replace '[^\d\-]', '') }
+    }
+    if ($code -eq '0') { return '' }
+    if ($code) { return "batch result $code reported by /DumpResult (0 = success)" }
+    return "/DumpResult wrote no result - the batch command did not complete"
+}
+
 
 function Test-OutputNonEmpty {
     # Postcondition: the platform must have produced a non-empty output file.
@@ -780,8 +804,9 @@ function Invoke-SourceCheck {
 	New-Item -ItemType Directory -Path $dir -Force | Out-Null
 	try {
 		$outFile = Join-Path $dir "check_log.txt"
-		$a = @("DESIGNER", "/F", "`"$BasePath`"", "/CheckConfig") + $Flags + @("/Out", "`"$outFile`"", "/DisableStartupDialogs") + $ExtraArgs
-		Write-Host "Running: 1cv8.exe $($a -join ' ')"
+		$resultFile = Join-Path $dir "check_result.txt"
+		$a = @("DESIGNER", "/F", "`"$BasePath`"", "/CheckConfig") + $Flags + @("/Out", "`"$outFile`"", "/DumpResult", "`"$resultFile`"", "/DisableStartupDialogs") + $ExtraArgs
+		Write-Host "Running: 1cv8.exe $((Format-ArgsForDisplay $a '1cv8') -join ' ')"
 		$res = Invoke-PlatformProcess $v8 $a -PreQuoted
 		$lines = @()
 		if (Test-Path $outFile) {
@@ -789,10 +814,13 @@ function Invoke-SourceCheck {
 			if ($raw) { $lines = @($raw -split "`r?`n" | Where-Object { $_.Trim() -ne '' }) }
 		}
 		# Платформа отвечает 101 на найденные проблемы; «Ошибок не обнаружено» приходит с кодом 0.
-		if ($res.ExitCode -eq 0) { return $false }
+		# 1c-rules: и /DumpResult = 0 — код 0 без результата пакетной команды успехом не считается.
+		$dumpError = Get-DumpResultError $resultFile
+		if ($res.ExitCode -eq 0 -and -not $dumpError) { return $false }
 		Write-Host "Error: платформа нашла проблемы в исходниках — сборка отменена" -ForegroundColor Red
 		# Пустой лог при ненулевом коде — отказ не по находкам (база занята, нет лицензии); молчать нельзя.
 		if ($lines.Count -eq 0) { Write-Host "  платформа вернула код $($res.ExitCode) без сообщений" -ForegroundColor Red }
+		if ($dumpError -and $res.ExitCode -eq 0) { Write-Host "  $dumpError" -ForegroundColor Red }
 		$hinted = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 		for ($i = 0; $i -lt $lines.Count; $i++) {
 			$l = $lines[$i]
@@ -805,7 +833,7 @@ function Invoke-SourceCheck {
 		}
 		if ($hinted.Count -gt 0 -and -not $checkConfigSrc) {
 			Write-Host "[hint] Общие модули конфигурации проверке не видны: $(@($hinted) -join ', ')." -ForegroundColor Yellow
-			Write-Host "       Укажите -ConfigSrc (каталог выгрузки конфигурации) или базу с configSrc в .v8-project.json; либо соберите без проверки: -Checks off" -ForegroundColor Yellow
+			Write-Host "       Укажите -ConfigSrc (каталог выгрузки конфигурации) или EXPORT_PATH в .dev.env; либо соберите без проверки: -Checks off" -ForegroundColor Yellow
 		}
 		return $true
 	} finally {
@@ -870,6 +898,24 @@ function Resolve-ConfigSrc {
         }
         return (Resolve-Path -LiteralPath $ConfigSrc).ProviderPath
     }
+    # 1c-rules: .dev.env EXPORT_PATH before the registry configSrc — the project's configuration dump.
+    # Relative to the .dev.env directory; empty = the project root, used only when it holds a dump.
+    $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+    if (Test-Path $__devEnvHelper) {
+        . $__devEnvHelper
+        $__devEnvFile = Find-1CDevEnvFile
+        if ($__devEnvFile) {
+            $__root = Split-Path $__devEnvFile -Parent
+            $__exp = Get-1CDevEnvValue 'EXPORT_PATH'
+            $__p = if (-not $__exp) { $__root } elseif ([System.IO.Path]::IsPathRooted($__exp)) { $__exp } else { Join-Path $__root $__exp }
+            if (Test-Path -LiteralPath (Join-Path $__p "Configuration.xml") -PathType Leaf) {
+                return (Resolve-Path -LiteralPath $__p).ProviderPath
+            }
+            if ($__exp) {
+                Write-Host "WARNING: .dev.env EXPORT_PATH is not a configuration dump (no Configuration.xml): $__p — общие модули конфигурации проверке недоступны" -ForegroundColor Yellow
+            }
+        }
+    }
     $db = Find-ProjectDatabase
     if (-not $db -or -not $db.configSrc) { return $null }
     $p = [string]$db.configSrc
@@ -905,6 +951,7 @@ function New-StubBase {
     # Wait for the stub itself, not -Wait: that one waits for the whole process tree, and a
     # child the platform leaves behind (crashpad_handler on 8.5) would hold us. Touching
     # Handle keeps the exit code readable after the process is gone.
+    # 1c-rules: the stub runs in the same PowerShell edition as the build (pwsh under Core).
     $psExe = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh' } else { 'powershell.exe' }
     $p = Start-Process -FilePath $psExe -ArgumentList "-NoProfile -Command `"$stubCmd`"" -NoNewWindow -PassThru
     $null = $p.Handle
@@ -1018,6 +1065,7 @@ try {
     # --- Output ---
     $outFile = Join-Path $tempDir "build_log.txt"
     $arguments += "/Out", "`"$outFile`""
+    # 1c-rules: /DumpResult beside /Out - the batch verdict, read right after the launch.
     $resultFile = Join-Path $tempDir "batch_result.txt"
     $arguments += "/DumpResult", "`"$resultFile`""
     $arguments += "/DisableStartupDialogs"
@@ -1027,24 +1075,9 @@ try {
     Write-Host "Running: 1cv8.exe $(Protect-Secrets ((Format-ArgsForDisplay $arguments $engine) -join ' ') @($Password, $UserName))"
     $__v8 = Invoke-PlatformProcess $V8Path $arguments -PreQuoted
     $exitCode = $__v8.ExitCode
-
-    # The platform's own batch verdict: /DumpResult writes 0 on success. Read it before
-    # trusting the exit code - a batch command can fail while 1cv8 exits 0 (canon:
-    # content/rules/designer-batch-checks.md -> The verdict is three signals).
     if ($exitCode -eq 0) {
-        $dumpCode = ''
-        if (Test-Path -LiteralPath $resultFile) {
-            $dumpText = Get-Content -LiteralPath $resultFile -Raw -ErrorAction SilentlyContinue
-            if ($dumpText) { $dumpCode = ($dumpText -replace '[^\d\-]', '') }
-        }
-        if ($dumpCode -ne '0') {
-            if ($dumpCode) {
-                Write-Host "[error] batch result $dumpCode reported by /DumpResult (0 = success)" -ForegroundColor Red
-            } else {
-                Write-Host "[error] /DumpResult wrote no result - the batch command did not complete" -ForegroundColor Red
-            }
-            $exitCode = 1
-        }
+        $__dumpError = Get-DumpResultError $resultFile
+        if ($__dumpError) { Write-Host "[error] $__dumpError" -ForegroundColor Red; $exitCode = 1 }
     }
 
     # --- Result ---

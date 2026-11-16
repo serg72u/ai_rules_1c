@@ -1,5 +1,16 @@
 ﻿# form-add v1.34 — Add managed form to 1C config object
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: .dev.env SUPPORT_GUARD wins over .v8-project.json, and an unreadable
+# support state fails closed; -FormName must be a 1C identifier (refused with
+# exit 2 before any path or XPath is built from it); -FormName / -Synonym are
+# XML-escaped in the descriptor. (The information register's record form names
+# its main attribute "Запись" upstream too since 1.2x — Purpose=Record.)
+# Local (2026-11-08): -RegisterExisting registers a ready form (descriptor,
+# Ext/Form.xml, Module.bsl already on disk) in ChildObjects only — no form file
+# is written, no uuid and no Default*Form slot changes; a missing file, a
+# descriptor whose name / uuid does not fit, or a path through a link is refused
+# before the write, and an existing registration is a no-op. Not ported to
+# form-add.py.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
@@ -19,7 +30,12 @@ param(
 	# параметра "set-default" и без алиаса отвечает отказом биндинга. Написания -SetDefault,
 	# --SetDefault и --setdefault совпадают с именем параметра и так.
 	[Alias('set-default')]
-	[switch]$SetDefault
+	[switch]$SetDefault,
+
+	# Local: форма уже лежит на диске (перенос из прошлой выгрузки) — только зарегистрировать её
+	# в ChildObjects владельца, ни один файл формы не переписывать.
+	[Alias('register-existing')]
+	[switch]$RegisterExisting
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,10 +43,12 @@ $ErrorActionPreference = "Stop"
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
 # --- Support guard (Ext/ParentConfigurations.bin) ---
-# See docs/1c-support-state-spec.md. Blocks edits of vendor objects "на замке" /
+# Canon: docs/support-manage.md. Blocks edits of vendor objects "на замке" /
 # read-only configs unless allowed. Trigger = bin present; reaction from
-# .v8-project.json editingAllowedCheck (deny|warn|off, default deny). Never
-# throws — guard errors degrade to allow.
+# .dev.env SUPPORT_GUARD (deny|warn|off, default deny; .v8-project.json
+# editingAllowedCheck stays as the upstream fallback). Fail-closed on an
+# unreadable support state (bin exists but cannot be parsed — same reaction);
+# other guard errors degrade to allow with a stderr notice.
 function Get-RootUuid([string]$xmlPath) {
 	if (-not (Test-Path $xmlPath)) { return $null }
 	try {
@@ -118,15 +136,33 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		# New object (no element file): fall back to config root uuid.
 		if (-not $elemUuid -and $cfgDir) { $elemUuid = Get-RootUuid (Join-Path $cfgDir "Configuration.xml") }
 		if (-not $binPath -or -not (Test-Path $binPath)) { return }
-		$bytes = [System.IO.File]::ReadAllBytes($binPath)
-		if ($bytes.Length -le 32) { return }
-		$start = 0
-		if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
-		$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
-		$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
-		if (-not $hm.Success) { return }
-		$G = [int]$hm.Groups[1].Value
-		$K = [int]$hm.Groups[2].Value
+		# Bin present: an unreadable / unparseable support state must not silently
+		# degrade to allow — fail closed via the SUPPORT_GUARD reaction instead.
+		$G = 0; $K = 0; $text = $null; $parseOk = $false
+		try {
+			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
+			if ($bytes.Length -gt 32) {
+				$start = 0
+				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+				$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
+				$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
+				if ($hm.Success) {
+					$G = [int]$hm.Groups[1].Value
+					$K = [int]$hm.Groups[2].Value
+					$parseOk = $true
+				}
+			}
+		} catch {}
+		if (-not $parseOk) {
+			$mode = Get-EditMode $cfgDir
+			if ($mode -eq 'off') { return }
+			$msg = "[support-guard] Файл состояния поддержки «$binPath» существует, но не читается или не разбирается — состояние объекта неизвестно, он может быть на замке."
+			if ($mode -eq 'warn') { [Console]::Error.WriteLine("$msg Продолжаю по SUPPORT_GUARD=warn."); return }
+			[Console]::Error.WriteLine("$msg`nРедактирование остановлено (fail-closed). Проверьте целостность выгрузки, либо задайте SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md).")
+			exit 1
+		}
 		if ($K -eq 0) { return }
 		$best = $null
 		if ($elemUuid) {
@@ -152,7 +188,7 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		if ($mode -eq 'warn') { [Console]::Error.WriteLine("[support-guard] ПРЕДУПРЕЖДЕНИЕ: $reason. Цель: $rp"); return }
 		$head = "[support-guard] Редактирование отклонено: это объект типовой конфигурации на поддержке поставщика, прямое редактирование молча сломает будущие обновления."
 		$cfe = "Рекомендуемый путь: внести доработку в расширение (навыки cfe-borrow / cfe-patch-method) — состояние поддержки менять не нужно, обновления вендора сохраняются."
-		$offNote = "Снять проверку для этой базы: editingAllowedCheck = warn|off в .v8-project.json."
+		$offNote = "Снять проверку: SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md)."
 		if ($code -eq "capability-off") {
 			$state = "Состояние: у всей конфигурации выключена возможность изменения (режим read-only «из коробки») — поэтому объект «$rp» редактировать нельзя."
 			$fix = "Либо снять защиту явно (навык support-edit, два шага):`n  1. support-edit -Path ""$cfgDir"" -Capability on — включить возможность изменения (объекты пока остаются на замке);`n  2. support-edit -Path ""$rp"" -Set editable — открыть этот объект для редактирования.`n  Изменение применяется в базу полной загрузкой выгрузки и обходит механизм обновлений вендора."
@@ -165,7 +201,10 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		}
 		[Console]::Error.WriteLine("$head`n$state`n$cfe`n$fix`n$offNote")
 		exit 1
-	} catch { return }
+	} catch {
+		[Console]::Error.WriteLine("[support-guard] Проверка состояния поддержки не выполнена ($($_.Exception.Message)) — продолжаю без блокировки.")
+		return
+	}
 }
 
 # --- Detect XML format version ---
@@ -194,6 +233,27 @@ function Detect-FormatVersion([string]$dir) {
 		$d = $parent
 	}
 	return "2.17"
+}
+
+# --- Фаза 0: имя формы — идентификатор 1С ---
+# The name becomes a file name, a directory name and an XPath literal below, so it
+# is checked before any of them is built: path separators, ".." or a quote would
+# otherwise escape the Forms directory or break the XPath. Same allowlist as
+# remove-form.ps1 (Latin / Cyrillic letters, digits, underscore, not starting
+# with a digit, up to 128 characters); \z so a trailing newline is not accepted.
+if ($FormName -cnotmatch '^[A-Za-z_А-яЁё][0-9A-Za-z_А-яЁё]{0,127}\z') {
+	[Console]::Error.WriteLine("Недопустимое имя формы (-FormName): '$FormName'. Ожидается идентификатор 1С (латиница или кириллица, цифры и подчёркивание, не начинается с цифры, до 128 символов).")
+	exit 2
+}
+
+# Local: -RegisterExisting не создаёт форму и не трогает основные формы — ключи, которые что-то
+# из этого задают, при нём ничего бы не сделали. Отказ, а не молчаливый пропуск.
+if ($RegisterExisting) {
+	$regConflicts = @(foreach ($k in 'SetDefault', 'Synonym', 'Purpose') { if ($PSBoundParameters.ContainsKey($k)) { "-$k" } })
+	if ($regConflicts.Count -gt 0) {
+		[Console]::Error.WriteLine("-RegisterExisting только регистрирует готовую форму: $($regConflicts -join ', ') при нём не применяются (синоним — в дескрипторе формы, основная форма не меняется). Ничего не изменено.")
+		exit 2
+	}
 }
 
 # Версия формата как число для сравнений: "2.20" → 220, "2.9" → 209.
@@ -239,17 +299,6 @@ function Get-CompatModeRank([string]$mode) {
 		return [int]$Matches[1] * 10000 + [int]$Matches[2] * 100 + [int]$Matches[3]
 	}
 	return 0
-}
-
-# --- Фаза 0: имя формы — идентификатор 1С ---
-# The name becomes a file name, a directory name and an XPath literal below, so it
-# is checked before any of them is built: path separators, ".." or a quote would
-# otherwise escape the Forms directory or break the XPath. Same allowlist as
-# remove-form.ps1 (Latin / Cyrillic letters, digits, underscore, not starting
-# with a digit, up to 128 characters); \z so a trailing newline is not accepted.
-if ($FormName -cnotmatch '^[A-Za-z_А-яЁё][0-9A-Za-z_А-яЁё]{0,127}\z') {
-	[Console]::Error.WriteLine("Недопустимое имя формы (-FormName): '$FormName'. Ожидается идентификатор 1С (латиница или кириллица, цифры и подчёркивание, не начинается с цифры, до 128 символов).")
-	exit 2
 }
 
 # --- Фаза 1: Определение типа объекта ---
@@ -570,14 +619,7 @@ foreach ($p in $kindPurposes.Keys) {
 	if ($p.ToLowerInvariant() -eq $Purpose.ToLowerInvariant()) { $purposeKey = $p; break }
 }
 if (-not $purposeKey) {
-	# Список допустимых считаем до сообщения и защитно: раньше текст ошибки сам падал
-	# («операция индексирования» / пустой набор), и оператор вместо причины видел трейс.
-	$allowedPurposes = if ($kindPurposes) { @($kindPurposes.Keys | Sort-Object) -join ', ' } else { '' }
-	if (-not $allowedPurposes) {
-		Write-Error "Назначение '$Purpose' недопустимо: для типа $objectType назначений формы не задано."
-		exit 1
-	}
-	Write-Error "Назначение '$Purpose' недопустимо для $objectType. Допустимые: $allowedPurposes"
+	Write-Error "Назначение '$Purpose' недопустимо для $objectType. Допустимые: $(($kindPurposes.Keys | Sort-Object) -join ', ')"
 	exit 1
 }
 $Purpose = $purposeKey
@@ -611,7 +653,70 @@ $objectDir = [System.IO.Path]::ChangeExtension($objectXmlFull.ProviderPath, $nul
 $formsDir = Join-Path $objectDir "Forms"
 $formMetaPath = Join-Path $formsDir "$FormName.xml"
 
-if (Test-Path $formMetaPath) {
+if ($RegisterExisting) {
+	# Local: готовая форма — три файла на месте, внутри каталога Forms владельца, без ссылок
+	# (symlink / junction) на пути; дескриптор называет эту форму и несёт свой корректный uuid.
+	function Stop-RegisterExisting([string]$msg) {
+		[Console]::Error.WriteLine("-RegisterExisting: $msg Ничего не изменено.")
+		exit 1
+	}
+	$regFormXml = Join-Path (Join-Path (Join-Path $formsDir $FormName) "Ext") "Form.xml"
+	$regModule = Join-Path (Join-Path (Join-Path (Join-Path $formsDir $FormName) "Ext") "Form") "Module.bsl"
+	$regMissing = @(foreach ($p in @($formMetaPath, $regFormXml, $regModule)) { if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { $p } })
+	if ($regMissing.Count -gt 0) {
+		Stop-RegisterExisting "форма '$FormName' не готова — нет файлов: $($regMissing -join '; '). Новую форму создаёт form-add без -RegisterExisting."
+	}
+	$formsDirFull = [System.IO.Path]::GetFullPath($formsDir).TrimEnd('\', '/')
+	foreach ($p in @($objectDir, $formsDir, (Join-Path $formsDir $FormName), (Split-Path $regFormXml), (Split-Path $regModule), $formMetaPath, $regFormXml, $regModule)) {
+		$full = [System.IO.Path]::GetFullPath($p)
+		if ($p -ne $objectDir -and $p -ne $formsDir -and -not $full.StartsWith($formsDirFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+			Stop-RegisterExisting "путь '$full' выходит за каталог форм '$formsDirFull'."
+		}
+		if (((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+			Stop-RegisterExisting "путь '$full' ведёт через ссылку (symlink / junction) — регистрируется только форма, лежащая в каталоге владельца."
+		}
+	}
+	$regDesc = New-Object System.Xml.XmlDocument
+	try { $regDesc.Load($formMetaPath) } catch { Stop-RegisterExisting "дескриптор '$formMetaPath' не разбирается как XML: $($_.Exception.Message)." }
+	$regFormEl = $null
+	if ($regDesc.DocumentElement -and $regDesc.DocumentElement.LocalName -eq 'MetaDataObject') {
+		foreach ($ch in $regDesc.DocumentElement.ChildNodes) { if ($ch.NodeType -eq 'Element') { $regFormEl = $ch; break } }
+	}
+	if (-not $regFormEl -or $regFormEl.LocalName -ne 'Form') { Stop-RegisterExisting "'$formMetaPath' — не дескриптор формы (ожидается MetaDataObject/Form)." }
+	$regUuid = $regFormEl.GetAttribute('uuid')
+	if ($regUuid -cnotmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $regUuid -eq '00000000-0000-0000-0000-000000000000') {
+		Stop-RegisterExisting "у дескриптора '$formMetaPath' некорректный uuid '$regUuid'."
+	}
+	$regNameEl = $null
+	foreach ($ch in $regFormEl.ChildNodes) {
+		if ($ch.NodeType -eq 'Element' -and $ch.LocalName -eq 'Properties') {
+			foreach ($gc in $ch.ChildNodes) { if ($gc.NodeType -eq 'Element' -and $gc.LocalName -eq 'Name') { $regNameEl = $gc; break } }
+		}
+	}
+	$regName = if ($regNameEl) { $regNameEl.InnerText.Trim() } else { '' }
+	if ($regName -cne $FormName) {
+		Stop-RegisterExisting "дескриптор '$formMetaPath' называет форму '$regName', а регистрируется '$FormName' — имя файла и Properties/Name должны совпадать."
+	}
+	# uuid формы не должен совпадать ни с одним uuid владельца и ни с одной другой его формой
+	# (копия дескриптора под новым именем без смены uuid — частая ошибка переноса).
+	foreach ($u in $xmlDoc.SelectNodes('//@uuid')) {
+		if ($u.Value.Trim() -eq $regUuid) { Stop-RegisterExisting "uuid формы $regUuid уже занят в '$($objectXmlFull.ProviderPath)'." }
+	}
+	foreach ($other in @(Get-ChildItem -LiteralPath $formsDir -Filter '*.xml' -File)) {
+		if ($other.FullName -eq [System.IO.Path]::GetFullPath($formMetaPath)) { continue }
+		if ((Get-RootUuid $other.FullName) -eq $regUuid) { Stop-RegisterExisting "uuid формы $regUuid совпадает с uuid формы '$($other.FullName)'." }
+	}
+	$regForm = New-Object System.Xml.XmlDocument
+	try { $regForm.Load($regFormXml) } catch { Stop-RegisterExisting "'$regFormXml' не разбирается как XML: $($_.Exception.Message)." }
+	if ($regForm.DocumentElement.LocalName -ne 'Form' -or $regForm.DocumentElement.NamespaceURI -ne 'http://v8.1c.ru/8.3/xcf/logform') {
+		Stop-RegisterExisting "'$regFormXml' — не управляемая форма (ожидается корень logform:Form)."
+	}
+	foreach ($pair in @(@('descriptor', $regDesc.DocumentElement.GetAttribute('version')), @('Form.xml', $regForm.DocumentElement.GetAttribute('version')))) {
+		if ($pair[1] -and $pair[1] -ne $script:formatVersion) {
+			Write-Host "[WARN] $($pair[0]) формы '$FormName' в формате $($pair[1]), владелец — $($script:formatVersion): платформа загружает выгрузку только в одном формате, проверьте form-validate / meta-validate"
+		}
+	}
+} elseif (Test-Path $formMetaPath) {
 	Write-Error "Форма уже существует: $formMetaPath"
 	exit 1
 }
@@ -620,13 +725,23 @@ $formDir = Join-Path $formsDir $FormName
 $formExtDir = Join-Path $formDir "Ext"
 $formModuleDir = Join-Path $formExtDir "Form"
 
-New-Item -ItemType Directory -Path $formModuleDir -Force | Out-Null
+# Local: -RegisterExisting — файлы формы уже есть и не пишутся (здесь и в 3a–3c).
+if (-not $RegisterExisting) { New-Item -ItemType Directory -Path $formModuleDir -Force | Out-Null }
 
 $encBom = New-Object System.Text.UTF8Encoding($true)
 
 # --- 3a. Метаданные формы ---
 
 $formUuid = [guid]::NewGuid().ToString()
+
+function ConvertTo-XmlText([string]$Value) {
+	# The descriptor below is a here-string, not a serializer, so an ordinary synonym
+	# such as "A & B" used to land in the file verbatim and made it unparseable - while
+	# the scaffolder still exited 0 and the validator still passed, because it only
+	# checked that the descriptor path existed. Escape escapes the same five entities
+	# as xml_text() in form-add.py, so the two runtimes stay byte-identical.
+	return [System.Security.SecurityElement]::Escape($Value)
+}
 
 # ExtendedPresentation — only for DataProcessor, Report, ExternalDataProcessor, ExternalReport forms
 $extPresentationLine = ""
@@ -641,28 +756,16 @@ if ((Get-FormatRank $script:formatVersion) -ge 221) {
 	$useInIfcLine = "`n`t`t`t<UseInInterfaceCompatibilityMode>Any</UseInInterfaceCompatibilityMode>"
 }
 
-# 1c-rules: the descriptor is built as text, so user-supplied strings must be escaped —
-# an ordinary synonym like `A & B` otherwise produced a descriptor no parser accepts (the
-# upstream text interpolates the values verbatim). SecurityElement::Escape covers exactly
-# the five XML entities; the form name is already an identifier by Phase 0.
-function ConvertTo-XmlText([string]$Value) {
-	if ($null -eq $Value) { return "" }
-	return [System.Security.SecurityElement]::Escape($Value)
-}
-
-$formNameXml = ConvertTo-XmlText $FormName
-$synonymXml = ConvertTo-XmlText $Synonym
-
 $formMetaXml = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <MetaDataObject $($script:xmlnsDecl) version="$($script:formatVersion)">
 	<Form uuid="$formUuid">
 		<Properties>
-			<Name>$formNameXml</Name>
+			<Name>$(ConvertTo-XmlText $FormName)</Name>
 			<Synonym>
 				<v8:item>
 					<v8:lang>ru</v8:lang>
-					<v8:content>$synonymXml</v8:content>
+					<v8:content>$(ConvertTo-XmlText $Synonym)</v8:content>
 				</v8:item>
 			</Synonym>
 			<Comment/>
@@ -688,7 +791,7 @@ function Write-XmlFile([string]$path, [string]$text, $encoding) {
 	[System.IO.File]::WriteAllText($path, $t.TrimEnd("`r", "`n"), $encoding)
 }
 
-Write-XmlFile $formMetaPath $formMetaXml $encBom
+if (-not $RegisterExisting) { Write-XmlFile $formMetaPath $formMetaXml $encBom }
 
 # --- 3b. Form.xml ---
 
@@ -735,7 +838,9 @@ $formXml = @"
 </Form>
 "@
 
-if (Test-Path $formXmlPath) {
+if ($RegisterExisting) {
+	# готовый Form.xml проверен в фазе 3 и не переписывается
+} elseif (Test-Path $formXmlPath) {
 	Write-Host "[SKIP] Form.xml already exists: $formXmlPath — not overwriting"
 } else {
 	Write-XmlFile $formXmlPath $formXml $encBom
@@ -757,7 +862,9 @@ $modulePath = Join-Path $formModuleDir "Module.bsl"
 
 $moduleBsl = (Get-FormModuleTemplate) -join "`n"
 
-if (Test-Path $modulePath) {
+if ($RegisterExisting) {
+	# готовый Module.bsl проверен в фазе 3 и не переписывается
+} elseif (Test-Path $modulePath) {
 	Write-Host "[SKIP] Module.bsl already exists: $modulePath — not overwriting"
 } else {
 	# Модуль пишем в каноне платформы: CRLF в разделителях строк (корпус: 2643 CRLF,
@@ -836,6 +943,12 @@ if (-not $childObjects) {
 # Добавить <Form>$FormName</Form> — идемпотентно (не дублировать уже зарегистрированную)
 $alreadyRegistered = [bool]$childObjects.SelectSingleNode("md:Form[text()='$FormName']", $nsMgr)
 
+# Local: повторная регистрация готовой формы — без записи, владелец остаётся побайтно прежним.
+if ($RegisterExisting -and $alreadyRegistered) {
+	Write-Host "Already registered: <Form>$FormName</Form> in ChildObjects — nothing to do, no file written"
+	exit 0
+}
+
 if (-not $alreadyRegistered) {
 $formElem = $xmlDoc.CreateElement("Form", "http://v8.1c.ru/8.3/MDClasses")
 $formElem.InnerText = $FormName
@@ -888,7 +1001,8 @@ if ($defaultPropName) {
 }
 
 $defaultUpdated = $false
-if ($SetDefault -or $isFirstFormForPurpose) {
+# Local: -RegisterExisting не назначает основную форму, даже если слот пуст.
+if (-not $RegisterExisting -and ($SetDefault -or $isFirstFormForPurpose)) {
 	if ($defaultNode) {
 		$defaultNode.InnerText = $defaultValue
 		$defaultUpdated = $true
@@ -914,7 +1028,8 @@ $xmlText = $xmlText.Replace('encoding="utf-8"', 'encoding="UTF-8"')
 # Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 # CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 # поэтому они идут первыми ветками альтернации и возвращаются как есть.
-$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+# Local (2026-09-14): processing instructions are protected as well — ` />` inside <?…?> is literal text.
+$xmlText = [regex]::Replace($xmlText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 # Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 # новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
 $targetEol = if ((Test-Path -LiteralPath $objectXmlFull.ProviderPath) -and ([System.IO.File]::ReadAllText($objectXmlFull.ProviderPath) -notmatch "`r`n")) { "`n" } else { "`r`n" }
@@ -934,7 +1049,7 @@ $objFileName = [System.IO.Path]::GetFileName($ObjectPath)
 $objDirName = Split-Path $ObjectPath -Parent
 $objBaseName = [System.IO.Path]::GetFileNameWithoutExtension($ObjectPath)
 
-Write-Host "Created:"
+Write-Host $(if ($RegisterExisting) { "Existing form files (not modified):" } else { "Created:" })
 Write-Host "  Metadata: $objDirName\$objBaseName\Forms\$FormName.xml"
 Write-Host "  Form:     $objDirName\$objBaseName\Forms\$FormName\Ext\Form.xml"
 Write-Host "  Module:   $objDirName\$objBaseName\Forms\$FormName\Ext\Form\Module.bsl"
@@ -946,6 +1061,8 @@ if ($alreadyRegistered) {
 }
 if ($defaultUpdated) {
 	Write-Host "${defaultPropName}: $defaultValue"
+} elseif ($RegisterExisting) {
+	Write-Host "Основная форма не менялась (-RegisterExisting)"
 } elseif (-not $defaultPropName) {
 	# Молчать здесь нельзя: пользователь ждёт, что форма станет основной, а свойства под неё
 	# у платформы нет (форма набора записей, произвольная форма).

@@ -1,12 +1,19 @@
-﻿# role-compile v1.47 — Compile 1C role from JSON
+﻿# role-compile v1.49 — Compile 1C role from JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: support guard reads .dev.env SUPPORT_GUARD first and fails closed on an unreadable
+# support state; new <ChildObjects> position from .dev.env NEW_OBJECT_POSITION (fallback
+# .v8-project.json newObjectPosition); an existing role is refused unless -Force (upstream
+# replaces it with a new uuid - existing roles are changed with role-edit).
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)]
 	[string]$JsonPath,
 
 	[Parameter(Mandatory)]
-	[string]$OutputDir
+	[string]$OutputDir,
+
+	# 1c-rules: replace an existing role deliberately (new uuid); otherwise refused.
+	[switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,14 +23,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -36,7 +52,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	Write-Output -NoEnumerate $parsed
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -175,6 +191,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -1654,6 +1672,12 @@ if ($leaf -eq "Roles") {
 
 # Metadata: Roles/RoleName.xml
 $metadataPath = Join-Path $rolesDir "$roleName.xml"
+# 1c-rules: a recompile writes a new uuid - the link to the infobase role and every reference
+# to it break. Existing roles are changed in place with role-edit; -Force replaces deliberately.
+if ((Test-Path -LiteralPath $metadataPath) -and -not $Force) {
+	[Console]::Error.WriteLine("[ERROR] Role '$roleName' already exists (Roles/$roleName.xml). Recompiling replaces it with a NEW uuid: the link to the infobase role and references to it break. Change an existing role with role-edit; pass -Force only to replace it deliberately.")
+	exit 1
+}
 if (-not (Test-Path $rolesDir)) {
 	New-Item -ItemType Directory -Path $rolesDir -Force | Out-Null
 }
@@ -1684,6 +1708,17 @@ $enc = New-Object System.Text.UTF8Encoding($true)
 function Get-NewObjectPosition([string]$cfgDir) {
 	try {
 		if (-not $cfgDir) { $cfgDir = "." }
+		# 1c-rules: .dev.env NEW_OBJECT_POSITION decides when the key is set (an unknown value = end),
+		# as in cf-edit / meta-compile; otherwise the upstream .v8-project.json newObjectPosition.
+		$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+		if (Test-Path $__devEnvHelper) {
+		    . $__devEnvHelper
+		    $__devEnvPos = (Get-1CDevEnvValue 'NEW_OBJECT_POSITION')
+		    if ($__devEnvPos) {
+		        if ($__devEnvPos.ToLower() -eq 'byname') { return "byName" }
+		        return "end"
+		    }
+		}
 		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return "end" }

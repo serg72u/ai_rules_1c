@@ -1,5 +1,7 @@
 ﻿# erf-init v1.9 — Init 1C external report scaffold (+write_xml_file/write_utf8_bom: общий эталон записи)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local (1c-rules): -BspForms — DefaultForm / DefaultSettingsForm / DefaultVariantForm are the БСП common
+#   forms (CommonForm.ФормаОтчета, …) — Local fix 2026-10-07.
 param(
 	[Parameter(Mandatory)]
 	[string]$Name,
@@ -16,7 +18,12 @@ param(
 	[string]$FormatVersion = "2.17",
 
 	# Основная форма, форма настроек и форма варианта — общие формы БСП (ФормаОтчета и др.)
-	[switch]$BspForms
+	[switch]$BspForms,
+
+	# Версия формата выгрузки. Своей конфигурации у автономного отчёта нет, наследовать
+	# версию неоткуда — поэтому её задают явно. Формы, макеты и справку внутри отчёта
+	# навыки берут уже отсюда: их детектор читает version из корня этого файла.
+	[string]$FormatVersion = "2.17"
 )
 
 $ErrorActionPreference = "Stop"

@@ -1,5 +1,19 @@
-﻿# cfe-borrow v1.58 — Borrow objects from configuration into extension (CFE)
+﻿# cfe-borrow v1.59 — Borrow objects from configuration into extension (CFE)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: Configurator 2.20 shapes kept over upstream —
+#        an element CommandSet keeps its ExcludedCommand list while the element keeps its DataPath
+#        (upstream drops every nested CommandSet but the main-attribute table's; an unbound one is
+#        dropped here too — the platform rejects Add / Copy of an unbound table);
+#        no empty Module.bsl for a borrowed form (cfe-patch-method creates it with the first code);
+#        a borrowed Document carries <RegisterRecords/>;
+#        a borrowed attribute / column keeps the source <Type> line layout (as the round-trip dump).
+# Local: -BorrowMainAttribute Only — the form main attribute without the cascade (no UseAlways /
+#        Columns, every data path stripped in both parts).
+# Local: a style:X missing from the source export fails the call and is not stripped.
+#        Platform style items stay. AutoCommandBar and form properties are scanned too.
+# Local: Russian kind segments in -Object (Реквизит, ТабличнаяЧасть, Форма, …) next to Russian types.
+# Local: NEW_OBJECT_POSITION comes from .dev.env first (tools/_common/DevEnv.ps1); .v8-project.json
+#        newObjectPosition is the upstream fallback.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory)][string]$ExtensionPath,
@@ -27,6 +41,8 @@ $script:formBindingPictureTags = @('MultipleValuePictureDataPath')
 
 # Пути ссылок параметров выбора, которые пришлось вырезать (для предупреждения в конце)
 $script:droppedLinks = @()
+# Объекты и элементы стиля, которых нет в выгрузке: ссылку не снимаем, в конце отказ со списком.
+$script:missingExports = New-Object System.Collections.Generic.List[string]
 
 # id основного реквизита в заимствованной форме — как у Конфигуратора
 $script:mainAttrId = "1000001"
@@ -37,6 +53,13 @@ $script:childObjectKinds = @('Attribute','Dimension','Resource','AddressingAttri
 # Виды подобъектов в -Object (Тип.Имя.<Вид>.<Имя>). Признак учёта субконто идёт только вместе с
 # ТЧ видов субконто (свойства ExtDimensionTypes у оболочки) — по одному не заимствуется.
 $script:subObjectKinds = @('Attribute','TabularSection','Dimension','Resource','AddressingAttribute','AccountingFlag')
+# Local: русские имена видов в -Object (Документ.Заказ.Реквизит.Склад). Сравнение — с учётом регистра,
+# как у английских видов в Split-BorrowItem.
+$script:subKindSynonyms = New-Object System.Collections.Hashtable ([StringComparer]::Ordinal)
+$script:subKindSynonyms['Реквизит'] = 'Attribute'; $script:subKindSynonyms['ТабличнаяЧасть'] = 'TabularSection'
+$script:subKindSynonyms['Измерение'] = 'Dimension'; $script:subKindSynonyms['Ресурс'] = 'Resource'
+$script:subKindSynonyms['РеквизитАдресации'] = 'AddressingAttribute'; $script:subKindSynonyms['ПризнакУчета'] = 'AccountingFlag'
+$script:subKindSynonyms['Форма'] = 'Form'
 # Своя колонка в заимствованной ТЧ: у этих видов — отказ UpdateDBCfg на любой платформе, у БП и
 # Задачи — ниже 8.3.25 (граница по версии платформы, не по режиму)
 $script:tsOwnColumnsBlocked = @('ChartOfCharacteristicTypes','ChartOfAccounts','ChartOfCalculationTypes')
@@ -66,6 +89,37 @@ function Strip-FormBindings {
 		$xml = [regex]::Replace($xml, "\s*<$tag>[^<]*</$tag>", '')
 	}
 	return $xml
+}
+
+# Колонки <AdditionalColumns> Конфигуратор пишет без <FunctionalOptions>. Остальные
+# функциональные опции формы не трогаем.
+function Remove-AdditionalColumnFunctionalOptions([string]$xml) {
+	if (-not $xml -or $xml -notmatch '<AdditionalColumns[\s>]') { return $xml }
+	return [regex]::Replace($xml, '(?s)(<AdditionalColumns\b[^>]*>)(.*?)(</AdditionalColumns>)', {
+		param($m)
+		$body = [regex]::Replace($m.Groups[2].Value, '(?s)\s*<FunctionalOptions>.*?</FunctionalOptions>', '')
+		$body = [regex]::Replace($body, '\s*<FunctionalOptions\s*/>', '')
+		return $m.Groups[1].Value + $body + $m.Groups[3].Value
+	})
+}
+
+# Составной тип из одних ссылок Конфигуратор сворачивает в cfg:AnyIBRef и объекты не заимствует.
+# Одна ссылка, примесь примитива или уже готовый TypeSet остаются как в источнике.
+function Convert-RefOnlyCompositeType([string]$typeXml) {
+	if (-not $typeXml) { return $typeXml }
+	if ($typeXml -match '<v8:TypeSet[\s>]') { return $typeXml }
+	$types = [regex]::Matches($typeXml, '<v8:Type>([^<]+)</v8:Type>')
+	if ($types.Count -lt 2) { return $typeXml }
+	foreach ($t in $types) {
+		if ($t.Groups[1].Value.Trim() -notmatch '^(?:\w+:)?\w+Ref\.\w+$') { return $typeXml }
+	}
+	$nl = if ($typeXml.Contains("`r`n")) { "`r`n" } else { "`n" }
+	$wrap = [regex]::Match($typeXml, '(?s)^(\s*<Type[^>]*>)(.*?)(\s*</Type>\s*)$')
+	if (-not $wrap.Success) { return $typeXml }
+	$indent = "`t"
+	$ind = [regex]::Match($wrap.Groups[2].Value, '\n([ \t]+)<v8:Type>')
+	if ($ind.Success) { $indent = $ind.Groups[1].Value }
+	return $wrap.Groups[1].Value + $nl + $indent + '<v8:TypeSet>cfg:AnyIBRef</v8:TypeSet>' + $wrap.Groups[3].Value
 }
 
 # Сдвиг блока на уровень вглубь для <BaseForm>; $firstIndent — отступ первой строки.
@@ -874,13 +928,14 @@ if ($items.Count -eq 0) {
 
 # --- 9b. Validate -BorrowMainAttribute ---
 if ($BorrowMainAttribute) {
+	# Local: Only — основной реквизит формы без каскада реквизитов объекта (привязки снимаются все)
 	if ($BorrowMainAttribute -notin @("Form","All","Only")) {
-		Write-Error "-BorrowMainAttribute accepts 'Form', 'All' or 'Only' (default: Form)"
+		Write-Error "-BorrowMainAttribute accepts 'Form', 'All' or 'Only'"
 		exit 1
 	}
 	# Validate: only with a form — .Form. pattern or a common form
 	$hasForm = $false
-	foreach ($item in $items) { if ($item -match '\.Form\.' -or $item -match '^(CommonForm|ОбщаяФорма)\.') { $hasForm = $true; break } }
+	foreach ($item in $items) { if ($item -match '\.(Form|Форма)\.' -or $item -match '^(CommonForm|ОбщаяФорма)\.') { $hasForm = $true; break } }
 	if (-not $hasForm) {
 		Write-Error "-BorrowMainAttribute requires a form in -Object (e.g. 'Catalog.X.Form.Y')"
 		exit 1
@@ -1225,16 +1280,25 @@ function Borrow-Form {
 	$srcCondAppearance = $srcFormEl.SelectSingleNode("*[local-name()='Attributes']/*[local-name()='ConditionalAppearance']")
 	$srcCondAppearanceXml = if ($srcCondAppearance) { [regex]::Replace($srcCondAppearance.OuterXml, $nsStripPattern, '') } else { "" }
 	$mainAttrInfo = if ($BorrowMainAttr) { $srcMainInfo } else { $null }
-	# Local: у реквизита формы Конфигуратор пишет <Type> одной строкой (в отличие от реквизитов
-	# объекта). Апстрим копирует блок как есть, и многострочный <Type> расходился с эталоном.
-	if ($mainAttrInfo -and $mainAttrInfo.Xml) {
-		$mainAttrInfo.Xml = [regex]::Replace($mainAttrInfo.Xml, '(?s)<Type>(.*?)</Type>', {
-			param($m) '<Type>' + ($m.Groups[1].Value -replace "\s*`r?`n\s*", '') + '</Type>'
-		})
-	}
 	$mainAttrName = if ($mainAttrInfo) { $mainAttrInfo.Name } else { "" }
 	if ($BorrowMainAttr -and -not $mainAttrInfo) {
 		Warn "  У формы нет основного реквизита — -BorrowMainAttribute проигнорирован"
+	}
+	# Local: режим Only — сам основной реквизит, без реквизитов объекта. Ни один путь от него в
+	# расширении не разрешится, поэтому привязки снимаются все (как в скелете), а у реквизита —
+	# UseAlways и Columns: они называют реквизиты и ТЧ объекта, которых в расширении нет.
+	if (-not $BorrowMainAttribute -and $srcMainInfo) {
+		Warn "  Форма заимствована без -BorrowMainAttribute: привязки к данным сняты. С «Добавить в расширение» Конфигуратора совпадает -BorrowMainAttribute Form."
+	}
+	$onlyMain = [bool]($mainAttrInfo -and $BorrowMainAttribute -eq 'Only')
+	if ($onlyMain) {
+		$onlyXml = [regex]::Replace($mainAttrInfo.Xml, '(?s)\s*<UseAlways>.*?</UseAlways>', '')
+		$onlyXml = [regex]::Replace($onlyXml, '(?s)\s*<Columns>.*?</Columns>', '')
+		$mainAttrInfo = @{ Name = $mainAttrInfo.Name; Xml = $onlyXml }
+		$mainAttrName = ""
+	} elseif ($mainAttrInfo) {
+		# Колонки AdditionalColumns Конфигуратор переносит без FunctionalOptions.
+		$mainAttrInfo.Xml = Remove-AdditionalColumnFunctionalOptions $mainAttrInfo.Xml
 	}
 
 	# Имена реквизитов объекта нужны в обоих режимах: без заимствования — для кода пути в связях
@@ -1262,16 +1326,13 @@ function Borrow-Form {
 	}
 	# Реквизиты объекта, которые попадут в расширение: в режиме Form — только используемые формой
 	# (тот же сбор, что в Borrow-MainAttribute), в режиме All — все ($null)
-	# Only — основной реквизит заимствуется, но каскада нет: набор реквизитов пуст.
 	$borrowedNames = $null
-	if ($mainAttrInfo -and $BorrowMainAttribute -eq 'Only') {
+	if ($onlyMain) {
+		# Only: реквизиты объекта не заимствуются — читаемым не остаётся ни один
 		$borrowedNames = @{}
 	} elseif ($mainAttrInfo -and $BorrowMainAttribute -eq 'Form') {
 		$borrowedNames = (Collect-FormDataPaths $srcFormXmlPath $srcMainAttrName).FirstLevel
 	}
-	# Local: в режиме Only реквизиты объекта не заимствуются, поэтому путей к данным в форме не
-	# остаётся вовсе; в Form/All корень — имя основного реквизита, остальные пути снимаются.
-	$bindRootName = if ($BorrowMainAttribute -eq 'Only') { '' } else { $mainAttrName }
 	$linkCtx = Get-LinkContext $srcFormEl $srcMainAttrName ([bool]$mainAttrInfo) $borrowedNames $srcAttrUuids $formAttrIds
 
 	# AutoCommandBar: keep ChildItems (buttons with CommandName→0), Autofill→false
@@ -1281,10 +1342,12 @@ function Borrow-Form {
 		$autoCmdXml = [regex]::Replace($autoCmdXml, $nsStripPattern, '')
 		$autoCmdXml = [regex]::Replace($autoCmdXml, '<CommandName>[^<]*</CommandName>', '<CommandName>0</CommandName>')
 		$autoCmdXml = $autoCmdXml -replace '<Autofill>true</Autofill>', '<Autofill>false</Autofill>'
-		# Local: вложенный CommandSet (в т.ч. с ExcludedCommand у таблиц) сохраняется — эталон
-		# Конфигуратора его оставляет, а вырезание давало форму, отличную от заимствования вручную.
+		# Вложенный CommandSet выбрасывается целиком, а не опустошается: Конфигуратор в заимствованной
+		# форме оставляет только корневой (тот идёт свойством формы, здесь его нет).
+		$autoCmdXml = [regex]::Replace($autoCmdXml, '(?s)\s*<CommandSet>.*?</CommandSet>', '')
+		$autoCmdXml = [regex]::Replace($autoCmdXml, '\s*<CommandSet/>', '')
 		# Strip data-binding tags whose root attribute isn't borrowed
-		$autoCmdXml = Strip-FormBindings $autoCmdXml $bindRootName
+		$autoCmdXml = Strip-FormBindings $autoCmdXml $mainAttrName
 		$autoCmdXml = Rewrite-ChoiceParameterLinks $autoCmdXml $linkCtx
 	}
 
@@ -1302,6 +1365,27 @@ function Borrow-Form {
 		}
 	}
 
+	# Local (ticket 2b392369, замер 8.3.27): CommandSet элемента переносится как есть, со списком
+	# ExcludedCommand, в обе части формы, — пока элемент сохраняет привязку к данным (с заимствованным
+	# основным реквизитом таблица на «Объект.Товары» остаётся связанной; так её пишет и выгрузка после
+	# загрузки расширения). Привязку сняли (скелет, режим Only) или её не было — набор выбрасывается
+	# целиком, как у апстрима (0737a795, fdd3bfa4): стандартных команд Add / Copy у несвязанной таблицы
+	# нет, и платформа отвергает загрузку — «Неверное имя команды элемента формы».
+	if ($srcChildItems) {
+		foreach ($elCmdSet in @($srcChildItems.SelectNodes(".//*[local-name()='CommandSet']"))) {
+			$csOwner = $elCmdSet.ParentNode
+			$csDp = $csOwner.SelectSingleNode("*[local-name()='DataPath']")
+			$csPath = if ($csDp) { $csDp.InnerText.Trim() } else { "" }
+			$csBound = [bool]($mainAttrName -and $csPath -and ($csPath -ceq $mainAttrName -or $csPath.StartsWith("$mainAttrName.", [StringComparison]::Ordinal)))
+			if ($csBound) { continue }
+			$csWs = $elCmdSet.PreviousSibling
+			if ($csWs -and ($csWs.NodeType -eq 'Whitespace' -or $csWs.NodeType -eq 'SignificantWhitespace')) {
+				$csOwner.RemoveChild($csWs) | Out-Null
+			}
+			$csOwner.RemoveChild($elCmdSet) | Out-Null
+		}
+	}
+
 	# ChildItems: copy full tree, clean up base-config references
 	$childItemsXml = ""
 	if ($srcChildItems) {
@@ -1311,26 +1395,9 @@ function Borrow-Form {
 		$childItemsXml = [regex]::Replace($childItemsXml, '<CommandName>[^<]*</CommandName>', '<CommandName>0</CommandName>')
 		# Strip data-binding tags whose root attribute isn't borrowed
 		# (DataPath/TitleDataPath/FooterDataPath/HeaderDataPath/MultipleValue*/RowPicture*)
-		$childItemsXml = Strip-FormBindings $childItemsXml $bindRootName
+		$childItemsXml = Strip-FormBindings $childItemsXml $mainAttrName
 		$childItemsXml = Rewrite-ChoiceParameterLinks $childItemsXml $linkCtx
-		# Вложенные CommandSet (у таблиц, полей табличного документа и т.п.) — целиком, см. выше.
-		# Исключение — набор таблицы самого основного реквизита, когда он заимствован: его команды
-		# (Find/CancelSearch динамического списка) снова разрешимы, и Конфигуратор набор оставляет
-		# (эталоны УТ CommonMain/ФайлыВТоме, StdPic_WithMain/ЖурналСкладскихАктов; без основного
-		# реквизита и у прочих элементов — выброшен во всех эталонах).
-		$keptCmdSets = [ordered]@{}
-		if ($mainAttrName) {
-			$mainTablePat = '(?s)(<Table name="[^"]+" id="\d+">(?:(?!<ChildItems>|</Table>|<CommandSet>).)*?<DataPath>' +
-				[regex]::Escape($mainAttrName) + '</DataPath>(?:(?!<ChildItems>|</Table>|<CommandSet>).)*?)(<CommandSet>.*?</CommandSet>)'
-			$childItemsXml = [regex]::Replace($childItemsXml, $mainTablePat, {
-				param($m)
-				$key = "@@KEPTCMDSET$($keptCmdSets.Count)@@"
-				$keptCmdSets[$key] = $m.Groups[2].Value
-				$m.Groups[1].Value + $key
-			})
-		}
-		# Local: CommandSet элементов сохраняется целиком (см. выше про AutoCommandBar).
-		foreach ($key in $keptCmdSets.Keys) { $childItemsXml = $childItemsXml.Replace($key, $keptCmdSets[$key]) }
+		# CommandSet элементов уже отобран выше (по привязке элемента), здесь не трогаем.
 		$childItemsXml = Rewrite-TypeLinks $childItemsXml $linkCtx
 		# Strip element-level Events (base form handlers not in extension)
 		$childItemsXml = [regex]::Replace($childItemsXml, '(?s)\s*<Events>.*?</Events>', '')
@@ -1483,15 +1550,35 @@ function Borrow-Form {
 	# Pattern 1: <Font ref="style:XXX" kind="StyleItem"/>, <TitleFont ref="style:XXX" ... kind="StyleItem"/>
 	# Pattern 2: <BackColor>style:XXX</BackColor>, <TextColor>style:XXX</TextColor>, etc.
 	# Порядок первого упоминания — как в Python-порте (от него зависит порядок в ChildObjects)
+	# Local: стили ищутся и в командной панели формы, и в свойствах формы — они переносятся в обе части
+	# так же, как ChildItems, и незаимствованный стиль там так же не даёт загрузить Configuration.xml.
 	$styleScanXml = $childItemsXml + $srcCondAppearanceXml
+	if ($autoCmdXml) { $styleScanXml += "`n" + $autoCmdXml }
+	foreach ($propXml in $formProps) { $styleScanXml += "`n" + $propXml }
+	# Local: встроенные стили платформы (тот же список, что в проверке 12 cfe-validate) — не объекты
+	# конфигурации: не заимствуются и не вырезаются.
+	$platformStyleItems = @{
+		"TableHeaderBackColor"=$true; "AccentColor"=$true; "NormalTextFont"=$true
+		"FormBackColor"=$true; "ToolTipBackColor"=$true; "BorderColor"=$true
+		"FieldBackColor"=$true; "FieldTextColor"=$true; "ButtonBackColor"=$true
+		"ButtonTextColor"=$true; "AlternateRowColor"=$true; "SpecialTextColor"=$true
+		"TextFont"=$true; "ImportantColor"=$true; "FormTextColor"=$true
+		"SmallTextFont"=$true; "ExtraLargeTextFont"=$true; "LargeTextFont"=$true
+		"NormalTextColor"=$true; "GroupHeaderBackColor"=$true; "GroupHeaderFont"=$true
+		"ErrorColor"=$true; "SuccessColor"=$true; "WarningColor"=$true
+		"FieldSelectionBackColor"=$true; "ReportGroup1BackColor"=$true; "ReportGroup2BackColor"=$true
+	}
 	$referencedStyles = [ordered]@{}
 	$styleRefs1 = [regex]::Matches($styleScanXml, 'ref="style:(\w+)"[^>]*kind="StyleItem"')
 	foreach ($m in $styleRefs1) { $referencedStyles[$m.Groups[1].Value] = $true }
+	$styleRefs1b = [regex]::Matches($styleScanXml, 'kind="StyleItem"[^>]*ref="style:(\w+)"')
+	foreach ($m in $styleRefs1b) { $referencedStyles[$m.Groups[1].Value] = $true }
 	# Закрывающий тег может быть с префиксом: в оформлении значение — <dcscor:value>style:X</dcscor:value>
 	$styleRefs2 = [regex]::Matches($styleScanXml, '>style:(\w+)</[\w:]+>')
 	foreach ($m in $styleRefs2) { $referencedStyles[$m.Groups[1].Value] = $true }
 
-	foreach ($styleName in $referencedStyles.Keys) {
+	foreach ($styleName in @($referencedStyles.Keys)) {
+		if ($platformStyleItems.ContainsKey($styleName)) { continue }
 		if (-not (Test-ObjectBorrowed "StyleItem" $styleName)) {
 			$styleSrcFile = Join-Path (Join-Path $cfgDir "StyleItems") "${styleName}.xml"
 			if (Test-Path $styleSrcFile) {
@@ -1507,31 +1594,24 @@ function Borrow-Form {
 				Add-ToChildObjects "StyleItem" $styleName
 				$script:borrowedFiles += $targetFile
 				Info "  Auto-borrowed: StyleItem.${styleName}"
+			} else {
+				# Файла стиля нет в выгрузке: ссылку не снимаем, в конце отказ со списком.
+				$script:missingExports.Add("StyleItem.${styleName}") | Out-Null
 			}
-			# Файла нет — встроенный стиль платформы (ImportantColor, AccentColor…): заимствовать
-			# нечего, пропускаем молча. Пользовательский стиль, на который ссылается форма, в
-			# валидном источнике существует всегда — предупреждение было только шумом.
 		}
 	}
-	# Local: ссылки на стили, которых в расширении нет, вырезаются. Конфигуратор не переносит
-	# тег, чей StyleItem остался в конфигурации-источнике; иначе форма в расширении отвергается
-	# («элемент стиля не найден»). Встроенные стили платформы (ImportantColor, ErrorColor…)
-	# остаются — они есть всегда.
-	$platformStyleItems = @{
-		"TableHeaderBackColor"=$true; "AccentColor"=$true; "NormalTextFont"=$true
-		"FormBackColor"=$true; "ToolTipBackColor"=$true; "BorderColor"=$true
-		"FieldBackColor"=$true; "FieldTextColor"=$true; "ButtonBackColor"=$true
-		"ButtonTextColor"=$true; "AlternateRowColor"=$true; "SpecialTextColor"=$true
-		"TextFont"=$true; "ImportantColor"=$true; "FormTextColor"=$true
-		"SmallTextFont"=$true; "ExtraLargeTextFont"=$true; "LargeTextFont"=$true
-		"NormalTextColor"=$true; "GroupHeaderBackColor"=$true; "GroupHeaderFont"=$true
-		"ErrorColor"=$true; "SuccessColor"=$true; "WarningColor"=$true
-	}
-	$borrowedStyleSet = @{}
+
+	# Local: ссылка style:X, которой нет ни среди заимствованных стилей, ни среди стилей платформы,
+	# вырезается из элементов, командной панели и свойств формы: иначе платформа не загрузит
+	# Configuration.xml расширения. Оформление (dcscor:value) не трогаем: там значение — часть
+	# элемента оформления, и такой стиль заимствуется выше по файлу источника.
 	$styleNsMgr = New-Object System.Xml.XmlNamespaceManager($script:xmlDoc.NameTable)
 	$styleNsMgr.AddNamespace("md", $script:mdNs)
-	foreach ($sn in $script:xmlDoc.SelectNodes("//md:ChildObjects/md:StyleItem", $styleNsMgr)) {
-		$borrowedStyleSet[$sn.InnerText] = $true
+	$borrowedStyleSet = @{}
+	foreach ($sn in $script:xmlDoc.SelectNodes("//md:ChildObjects/md:StyleItem", $styleNsMgr)) { $borrowedStyleSet[$sn.InnerText] = $true }
+	$missingStyleSet = @{}
+	foreach ($miss in $script:missingExports) {
+		if ($miss.StartsWith('StyleItem.')) { $missingStyleSet[$miss.Substring(10)] = $true }
 	}
 	$stripStyleRef = {
 		param([string]$xml)
@@ -1545,9 +1625,10 @@ function Borrow-Form {
 			$hits = [regex]::Matches($xml, $pattern)
 			for ($si = $hits.Count - 1; $si -ge 0; $si--) {
 				$hm = $hits[$si]
-				$styleName = $hm.Groups[$hm.Groups.Count - 1].Value
-				if ($platformStyleItems.ContainsKey($styleName)) { continue }
-				if ($borrowedStyleSet.ContainsKey($styleName)) { continue }
+				$hitStyle = $hm.Groups[$hm.Groups.Count - 1].Value
+				if ($platformStyleItems.ContainsKey($hitStyle)) { continue }
+				if ($borrowedStyleSet.ContainsKey($hitStyle)) { continue }
+				if ($missingStyleSet.ContainsKey($hitStyle)) { continue }
 				$xml = $xml.Remove($hm.Index, $hm.Length)
 			}
 		}
@@ -1555,9 +1636,10 @@ function Borrow-Form {
 	}
 	$childItemsXml = & $stripStyleRef $childItemsXml
 	if ($autoCmdXml) { $autoCmdXml = & $stripStyleRef $autoCmdXml }
-	for ($pi = 0; $pi -lt $formProps.Count; $pi++) { $formProps[$pi] = & $stripStyleRef $formProps[$pi] }
+	for ($fpi = 0; $fpi -lt $formProps.Count; $fpi++) {
+		$formProps[$fpi] = & $stripStyleRef $formProps[$fpi]
+	}
 	$formProps = @($formProps | Where-Object { $_ -and $_.Trim() })
-
 	# Открывающий тег <Form ...> берём из исходной формы — ради её объявлений пространств имён,
 	# но version подставляем СВОЮ: форма обязана нести версию расширения, иначе платформа
 	# отвергает импорт (форма 2.13 внутри расширения 2.17). Раньше тег копировался целиком,
@@ -1674,17 +1756,15 @@ function Borrow-Form {
 		$script:droppedLinks = @()
 	}
 
-	# 6. Create empty Module.bsl — but NEVER overwrite an existing one (re-borrow must
-	# not clobber user code added to the form module).
+	# 6. Local: модуль формы. Конфигуратор 2.20 не пишет Module.bsl заимствованной формы, пока в модуле
+	# нет кода (его создаёт cfe-patch-method с первым перехватчиком). Пустой файл не создаём; уже
+	# лежащий — код пользователя: повторное заимствование его не трогает.
 	$moduleDir = Join-Path $formXmlDir "Form"
 	$moduleBslFile = Join-Path $moduleDir "Module.bsl"
-	# Local: Конфигуратор не заводит пустой Module.bsl у заимствованной формы — файл появляется,
-	# только когда в модуле есть код. Пустой файл ломает round-trip (form-edit/remove-form считают
-	# модуль существующим) и расходится с эталоном выгрузки. Существующий модуль не трогаем.
+	$formModuleFiles = @()
 	if (Test-Path $moduleBslFile) {
 		Info "  Preserved existing Module.bsl"
-	} else {
-		Info "  Module.bsl not created (no module code)"
+		$formModuleFiles += $moduleBslFile
 	}
 
 	# 6b. Встроенные картинки элементов. Form.xml ссылается на них как <xr:Abs>Файл</xr:Abs>, а сам файл
@@ -1739,7 +1819,7 @@ function Borrow-Form {
 		Register-FormInObject $typeName $objName $formName
 	}
 
-	return @($formMetaFile, $formXmlFile, $moduleBslFile) + $picFiles
+	return @($formMetaFile, $formXmlFile) + $formModuleFiles + $picFiles
 }
 
 # --- 10d. Helper: register form in parent object's ChildObjects ---
@@ -2381,7 +2461,8 @@ function Collect-FormDataPaths {
 		$bms = [regex]::Matches($content, "<$tag>[^<]*\b$root\.(\w+(?:\.\w+)*)</$tag>")
 		foreach ($m in $bms) {
 			$path = $m.Groups[1].Value
-			$segments = $path.Split(".")
+			$segments = @($path.Split('.') | Where-Object { $_ -cne 'CurrentData' })
+			if ($segments.Count -eq 0) { continue }
 			$seg0 = $segments[0]
 			if ($script:standardFields -contains $seg0) { continue }
 			$firstLevel[$seg0] = $true
@@ -2397,7 +2478,8 @@ function Collect-FormDataPaths {
 	$fieldMatches = [regex]::Matches($content, "<Field>[^<]*\b$root\.(\w+(?:\.\w+)*)</Field>")
 	foreach ($m in $fieldMatches) {
 		$path = $m.Groups[1].Value
-		$segments = $path.Split(".")
+		$segments = @($path.Split('.') | Where-Object { $_ -cne 'CurrentData' })
+		if ($segments.Count -eq 0) { continue }
 		$seg0 = $segments[0]
 		if ($script:standardFields -contains $seg0) { continue }
 		$firstLevel[$seg0] = $true
@@ -2405,6 +2487,22 @@ function Collect-FormDataPaths {
 			if ($script:standardFields -contains $segments[1]) { continue }
 			$deepPaths += ,$segments
 		}
+	}
+
+	# Items.<таблица>.CurrentData.<колонка>: таблица сама указывает табличную часть через DataPath.
+	$tableToTs = @{}
+	foreach ($tm in [regex]::Matches($content, "(?s)<Table name=`"([^`"]+)`"[^>]*>(?:(?!</Table>).)*?<DataPath>[^<]*\b$root\.(\w+)")) {
+		$tableToTs[$tm.Groups[1].Value] = $tm.Groups[2].Value
+	}
+	foreach ($im in [regex]::Matches($content, '<DataPath>Items\.(\w+)\.CurrentData\.(\w+)')) {
+		$tname = $im.Groups[1].Value
+		if (-not $tableToTs.ContainsKey($tname)) { continue }
+		$ts = $tableToTs[$tname]
+		$col = $im.Groups[2].Value
+		if ($script:standardFields -contains $ts) { continue }
+		$firstLevel[$ts] = $true
+		if ($script:standardFields -contains $col) { continue }
+		$deepPaths += ,@($ts, $col)
 	}
 
 	# Also scan <AdditionalColumns table="Объект.X"> — доп. колонки табличной части, объявленные в
@@ -2446,8 +2544,24 @@ function Collect-FormDataPaths {
 }
 
 # --- 11c. Resolve source attributes and tabular sections ---
+# Имена колонок, которые форма назвала путём <ТЧ>.<Колонка>. Ключ — Get-QueryKey имени ТЧ,
+# значение — набор Get-QueryKey колонок. Пустой набор не сужает: таблица без колонок в путях
+# и слово из текста запроса по-прежнему заимствуют все колонки.
+function Get-NamedTabularColumns($deepPaths) {
+	$map = @{}
+	foreach ($segs in $deepPaths) {
+		if ($segs.Count -lt 2) { continue }
+		$col = $segs[1]
+		if ($script:standardFields -contains $col) { continue }
+		$tsKey = Get-QueryKey $segs[0]
+		if (-not $map.ContainsKey($tsKey)) { $map[$tsKey] = @{} }
+		$map[$tsKey][(Get-QueryKey $col)] = $true
+	}
+	return $map
+}
+
 function Resolve-SourceAttributes {
-	param([string]$typeName, [string]$objName, $firstLevelNames)
+	param([string]$typeName, [string]$objName, $firstLevelNames, $tabularColumns)
 	# $firstLevelNames: hashtable of names, or $null for "all"
 	# Имена сверяются ключом запроса (регистр, Ё/Е): слова приходят и из текста запроса списка,
 	# а правило тильды (Get-DynListQueryUnresolved) считает их найденными по тому же ключу.
@@ -2465,7 +2579,11 @@ function Resolve-SourceAttributes {
 	}
 
 	$srcDoc = New-Object System.Xml.XmlDocument
-	$srcDoc.PreserveWhitespace = $false
+	# Local: <Type> идёт с разметкой строк источника — так его пишет выгрузка расширения из базы
+	# (замер 8.3.27: реквизиты, заимствованные с -BorrowMainAttribute, и подобъекты без формы).
+	# Реквизит и колонка ТЧ лежат в расширении на той же глубине, что в источнике, отступы совпадают.
+	# Апстрим читает источник без пробелов и пишет <Type> одной строкой; платформа принимает оба вида.
+	$srcDoc.PreserveWhitespace = $true
 	$srcDoc.Load($srcFile)
 
 	$srcNs = New-Object System.Xml.XmlNamespaceManager($srcDoc.NameTable)
@@ -2511,6 +2629,7 @@ function Resolve-SourceAttributes {
 			$typeXml = if ($typeNode) { $typeNode.OuterXml } else { "" }
 			# Strip namespace declarations from Type
 			$typeXml = [regex]::Replace($typeXml, '\s+xmlns(?::\w+)?="[^"]*"', '')
+			$typeXml = Convert-RefOnlyCompositeType $typeXml
 
 			$attrs += @{ Name = $attrName; Uuid = $uuid; TypeXml = $typeXml; Kind = $child.LocalName }
 		}
@@ -2549,7 +2668,15 @@ function Resolve-SourceAttributes {
 					$tsTypeNode = $tsChild.SelectSingleNode("md:Properties/md:Type", $srcNs)
 					$tsTypeXml = if ($tsTypeNode) { $tsTypeNode.OuterXml } else { "" }
 					$tsTypeXml = [regex]::Replace($tsTypeXml, '\s+xmlns(?::\w+)?="[^"]*"', '')
+					$tsTypeXml = Convert-RefOnlyCompositeType $tsTypeXml
 					$tsAttrs += @{ Name = $tsAttrName.InnerText; Uuid = $tsAttrUuid; TypeXml = $tsTypeXml }
+				}
+			}
+			# Form: колонки, которые форма назвала путём. Нет ни одного пути на колонку — весь состав.
+			if ($null -ne $tabularColumns) {
+				$wanted = $tabularColumns[(Get-QueryKey $tsName)]
+				if ($wanted -and $wanted.Count -gt 0) {
+					$tsAttrs = @($tsAttrs | Where-Object { $wanted.ContainsKey((Get-QueryKey $_.Name)) })
 				}
 			}
 
@@ -2598,33 +2725,6 @@ function Resolve-SourceAttributes {
 }
 
 # --- 11d. Build adopted attribute XML ---
-# Local: Конфигуратор пишет <Type> многострочно — каждый дочерний элемент на своей строке
-# с шагом в один уровень. Апстрим отдаёт блок одной строкой, и заимствованный объект расходился
-# с эталоном выгрузки. Функция идемпотентна: блок с переводом строки возвращается как есть.
-function Format-TypeXml([string]$xml, [string]$indent) {
-	if (-not $xml) { return $xml }
-	$s = $xml.Trim()
-	if ($s -notmatch '^<Type[ >]' -or $s -match "`r?`n") { return $s }
-	$sep = [string][char]1
-	$parts = @(($s -replace '><', (">" + $sep + "<")) -split $sep)
-	$depth = 0
-	$tab = "`t"
-	$out = New-Object System.Collections.Generic.List[string]
-	foreach ($raw in $parts) {
-		$tag = $raw.Trim()
-		if (-not $tag) { continue }
-		$isClose = $tag.StartsWith('</')
-		$isSelf = $tag.EndsWith('/>')
-		# Часть может нести открывающий и закрывающий тег сразу (<v8:Type>x</v8:Type>) — она
-		# закончена и глубину не меняет.
-		$isComplete = (-not $isClose) -and (-not $isSelf) -and ($tag.IndexOf('</', 1) -ge 0)
-		if ($isClose -and $depth -gt 0) { $depth-- }
-		$out.Add(($tab * $depth) + $tag)
-		if (-not $isClose -and -not $isSelf -and -not $isComplete) { $depth++ }
-	}
-	return (($out | ForEach-Object { $indent + $_ }) -join "`r`n")
-}
-
 function Build-AdoptedAttributeXml {
 	param([string]$name, [string]$sourceUuid, [string]$typeXml, [string]$indent, [string]$kind = "Attribute")
 
@@ -2637,8 +2737,7 @@ function Build-AdoptedAttributeXml {
 	$sb.AppendLine("${indent}`t`t<Name>${name}</Name>") | Out-Null
 	$sb.AppendLine("${indent}`t`t<Comment/>") | Out-Null
 	$sb.AppendLine("${indent}`t`t<ExtendedConfigurationObject>${sourceUuid}</ExtendedConfigurationObject>") | Out-Null
-	# Local: <Type> — многострочно, как у Конфигуратора (см. Format-TypeXml).
-	if ($typeXml) { $sb.Append((Format-TypeXml $typeXml "${indent}`t`t") + "`r`n") | Out-Null }
+	$sb.AppendLine("${indent}`t`t${typeXml}") | Out-Null
 	$sb.AppendLine("${indent}`t</Properties>") | Out-Null
 	$sb.Append("${indent}</${kind}>") | Out-Null
 	return $sb.ToString()
@@ -2882,7 +2981,7 @@ function Borrow-ObjectShell([string]$typeName, [string]$objName) {
 	}
 	$srcFile = Join-Path (Join-Path $cfgDir $childTypeDirMap[$typeName]) "${objName}.xml"
 	if (-not (Test-Path $srcFile)) {
-		Warn "  Source not found: ${typeName}.${objName}"
+		$script:missingExports.Add("${typeName}.${objName}") | Out-Null
 		return
 	}
 	$src = Read-SourceObject $typeName $objName
@@ -3051,10 +3150,8 @@ function Borrow-MainAttribute {
 	# Step 1: Collect DataPaths (Form mode) or take all (All mode)
 	$firstLevelNames = $null
 	$deepPaths = @()
-	if ($mode -eq "Only") {
-		Info "  Mode Only: main attribute only, no cascade"
-		$firstLevelNames = @{}
-	} elseif ($mode -eq "Form") {
+	$tabularColumns = $null
+	if ($mode -eq "Form") {
 		if (-not (Test-Path $srcFormXmlPath)) {
 			Write-Error "Source Form.xml not found: $srcFormXmlPath"
 			exit 1
@@ -3071,6 +3168,7 @@ function Borrow-MainAttribute {
 		$dp = Collect-FormDataPaths $srcFormXmlPath $dpInfo.Name
 		$firstLevelNames = $dp.FirstLevel
 		$deepPaths = $dp.DeepPaths
+		$tabularColumns = Get-NamedTabularColumns $deepPaths
 		Info "  Collected $($firstLevelNames.Count) first-level DataPath references, $($deepPaths.Count) deep paths"
 	} else {
 		Info "  Mode All: borrowing all attributes and tabular sections"
@@ -3086,7 +3184,7 @@ function Borrow-MainAttribute {
 	}
 
 	# Step 2: Resolve source attributes
-	$resolved = Resolve-SourceAttributes $typeName $objName $firstLevelNames
+	$resolved = Resolve-SourceAttributes $typeName $objName $firstLevelNames $tabularColumns
 	$srcAttrs = $resolved.Attributes
 	$srcTS = $resolved.TabularSections
 	$extraProps = $resolved.ExtraProps
@@ -3282,10 +3380,9 @@ function Build-BorrowedObjectXml {
 		$sb.AppendLine("`t`t`t$($sourceProps['__OwnersXml'])") | Out-Null
 	}
 
-	# Local: Configurator writes an empty <RegisterRecords/> for a borrowed document (after the
-	# properties that -BorrowMainAttribute may add). Its absence made the extension load with a
-	# different structure than the Configurator's own borrow.
-	if ($typeName -eq "Document" -and -not $sourceProps.ContainsKey("__RegisterRecordsXml")) {
+	# Local: Конфигуратор 2.20 пишет у заимствованного документа пустой <RegisterRecords/>. Свойства
+	# Number*, которые дописывает -BorrowMainAttribute, встают раньше — сразу за ExtendedConfigurationObject.
+	if ($typeName -eq "Document") {
 		$sb.AppendLine("`t`t`t<RegisterRecords/>") | Out-Null
 	}
 
@@ -3364,9 +3461,21 @@ function Find-V8Project([string]$startDir) {
 # остаётся рабочим каталогом проекта.
 # configSrc считается от каталога .v8-project.json, как задокументировано в
 # docs/v8-project-guide.md. Реестр семьи: tests/skills/check-inline-drift.mjs.
+# 1c-rules: источник правды — .dev.env NEW_OBJECT_POSITION (как в cf-edit / meta-compile);
+# .v8-project.json — запасной путь апстрима. Значение задано → решает .dev.env, нераспознанное
+# значение = end; пусто / ключа нет → '' от хелпера, и запасной путь остаётся в силе.
 function Get-NewObjectPosition([string]$cfgDir) {
 	try {
 		if (-not $cfgDir) { $cfgDir = "." }
+		$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+		if (Test-Path $__devEnvHelper) {
+		    . $__devEnvHelper
+		    $__devEnvPos = (Get-1CDevEnvValue 'NEW_OBJECT_POSITION')
+		    if ($__devEnvPos) {
+		        if ($__devEnvPos.ToLower() -eq 'byname') { return "byName" }
+		        return "end"
+		    }
+		}
 		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return "end" }
@@ -3513,6 +3622,10 @@ function Split-BorrowItem([string]$item) {
 	# Имена метаданных без точек — разбор по сегментам: Имя | Имя.Form.Ф | Имя.<Вид>.<П> | Имя.TabularSection.<ТЧ>.Attribute.<К>
 	$segs = $remainder.Split('.')
 	if ($segs -contains '') { return @{ Error = "Invalid format '${item}', $fmtHint" } }
+	# Local: русские имена видов сегментов (Реквизит, ТабличнаяЧасть, Форма…) — как и у типа
+	foreach ($si in @(1, 3)) {
+		if ($segs.Count -gt $si -and $script:subKindSynonyms.ContainsKey($segs[$si])) { $segs[$si] = $script:subKindSynonyms[$segs[$si]] }
+	}
 	$objName = $segs[0]
 	$formName = $null; $subKind = $null; $subName = $null; $colName = $null
 	if ($segs.Count -eq 1) {
@@ -3564,9 +3677,7 @@ function Resolve-SubObjectSource($pi) {
 		return @{ TS = $ts; Col = $col }
 	}
 	$attr = $res.Attributes | Where-Object { $_.Kind -ceq $pi.SubKind -and (Get-QueryKey $_.Name) -ceq $key } | Select-Object -First 1
-	# Local: сообщение форка — по нему оператор отличает опечатку в имени реквизита от
-	# отсутствующего объекта конфигурации (тест и docs/support канон ссылаются на эту формулировку).
-	if (-not $attr) { return @{ Error = "Source $($pi.SubKind.ToLower()) not found: $($pi.SubName)" } }
+	if (-not $attr) { return @{ Error = "$($pi.SubKind) '$($pi.SubName)' not found in ${where}" } }
 	return @{ Attr = $attr }
 }
 
@@ -3669,10 +3780,7 @@ foreach ($item in $items) {
 	if (-not $pi.SubKind) { continue }
 	$subSrc = Resolve-SubObjectSource $pi
 	if ($subSrc.Error) {
-		# Local: одной строкой в stderr. Write-Error добавляет путь к скрипту перед текстом и
-		# переносит длинную строку, из-за чего формулировка «Source attribute not found»
-		# перестаёт быть находимой (на неё опираются тесты и docs/support канон).
-		[Console]::Error.WriteLine("[ERROR] $($subSrc.Error). Extension not changed")
+		Write-Error "$($subSrc.Error). Extension not changed"
 		exit 1
 	}
 	$script:subObjectSources[$item] = $subSrc
@@ -3709,7 +3817,25 @@ foreach ($item in $items) {
 		$borrowedCount++
 
 		# Borrow main attribute if requested
-		if ($hasBMA -and $isCommonForm) {
+		if ($hasBMA -and $BorrowMainAttribute -eq 'Only') {
+			# Local: Only — без каскада. Реквизиты объекта не заимствуются; объект из типа основного
+			# реквизита — оболочкой, если это не владелец формы (иначе тип реквизита не разрешится).
+			$onlyOwner = $null
+			if ($pi.SrcFormXml -and (Test-Path $pi.SrcFormXml)) {
+				$onlyDoc = New-Object System.Xml.XmlDocument
+				$onlyDoc.Load($pi.SrcFormXml)
+				if ($isCommonForm) {
+					$o = Resolve-CommonFormOwner $onlyDoc.DocumentElement
+					if ($o -and $o.Kind -eq 'Object') { $onlyOwner = $o }
+				} else {
+					$onlyOwner = Resolve-MainAttributeObject $onlyDoc.DocumentElement $typeName $objName
+				}
+			}
+			if ($onlyOwner -and -not ($onlyOwner.TypeName -eq $typeName -and $onlyOwner.ObjName -eq $objName)) {
+				Borrow-ObjectShell $onlyOwner.TypeName $onlyOwner.ObjName
+			}
+			Info "  -BorrowMainAttribute Only: main attribute without the object's attributes"
+		} elseif ($hasBMA -and $isCommonForm) {
 			# У общей формы владельца нет — он выводится из типа основного реквизита
 			$cfSrcFormXmlPath = $pi.SrcFormXml
 			$cfDoc = New-Object System.Xml.XmlDocument
@@ -3911,5 +4037,10 @@ Write-Host "  Config:     $cfgDir"
 Write-Host "  Borrowed:   $borrowedCount object(s)"
 foreach ($f in $script:borrowedFiles) {
 	Write-Host "    - $f"
+}
+if ($script:missingExports.Count -gt 0) {
+	$list = (@($script:missingExports) | Select-Object -Unique) -join ', '
+	[Console]::Error.WriteLine("[ERROR] В выгрузке конфигурации нет: $list. Довыгрузите эти объекты и повторите заимствование; ссылки не сняты.")
+	exit 1
 }
 exit 0

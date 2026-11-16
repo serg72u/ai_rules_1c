@@ -1,21 +1,6 @@
-﻿# 1c-metadata-manage — sync history of the vendored scripts
+# 1c-metadata-manage — sync history of the vendored scripts
 
 The PowerShell tools under `tools/` are vendored from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (MIT). This file holds the per-document sync notes that used to close each `docs/*.md` (what each upstream sync changed, what was cross-checked and what stays deliberately local). It is maintainer history — nothing loads it during a task; the operational description of every tool lives in the domain doc named by each heading.
-
-## Python ports
-
-### Upstream sync `2026-10-28` — the Python entry points
-
-The upstream commit this sync targets also carries Python peers for almost every tool (77 `.py`), so the four ports we ship were rebuilt the same way as the PowerShell masters — three-way merge against the pinned base, fork deltas re-applied — instead of being left behind:
-
-- `meta-edit.py` — `.dev.env SUPPORT_GUARD` stays ahead of `.v8-project.json`; the validator is resolved as a sibling tree (`1c-meta-validate` / `1c-epf-validate`, `.py` first, `.ps1` as the fallback) and its exit code is propagated instead of being collected and dropped;
-- `form-add.py` — the fork's `.dev.env` gate stays; the register rule now follows upstream's purpose table (`Record` with `Запись`, `Object` refused with the allowed list) instead of the fork's hardcoded `Запись` for any object form;
-- `form-compile.py` — upstream's generated event catalog, from-object presets and handler stubs; fork deltas ported: an event outside the catalog is refused (element and form), a standalone `handlers` map produces its events, and a `handlers` key missing from `on` is refused instead of silently dropped;
-- `meta-validate.py` — the fork's exact `<Type><Category>.<Name>` rule for `GeneratedType` and the forbidden `Periodicity` / `DefaultRecordSetForm` entries for information registers were dropped: the PS master (v1.42) no longer enforces them and dumps the platform loads were being rejected. A missing `GeneratedType` category is a warning in both runtimes now.
-
-Consequence for the PowerShell side, found by the parity run and fixed there: `form-compile.ps1` still carried the `Write-Output -NoEnumerate` idiom, which under PowerShell 7 wraps a non-array in a `List<object>` and made every `-FromObject` run fail with «операция индексирования; индекс массива равен null»; and `form-add.ps1` built its "invalid purpose" message from a table that can be `$null`, so the error path itself threw. Both are fixed.
-
-`tools/tests/python-ports-regression.py` runs with **no skipped cases**: 60/60, parity of diagnostics and exit codes against the PowerShell masters included.
 
 ## bsp-manage.md
 
@@ -37,14 +22,17 @@ No script files were brought into `tools/` — the operations are pure module-te
 
 ## cf-manage.md
 
-### Upstream sync `2026-10-28`
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Source `662e752e`. `cf-edit` v1.12 → **v1.31**, `cf-init` v1.3 → **v1.17**, `cf-validate` v1.4 → **v1.13**, `cf-info` v1.4 → **v1.10**.
+`cf-edit` v1.12 → **v1.33**, `cf-info` v1.4 → **v1.10**, `cf-init` v1.3 → **v1.17**, `cf-validate` v1.4 → **v1.14**; `tools/1c-cf-manage/cf-edit-reference.md` refreshed.
 
-Deltas kept: the `.dev.env SUPPORT_GUARD` gate ahead of `.v8-project.json` `editingAllowedCheck`; `NEW_OBJECT_POSITION` from `.dev.env` inside upstream's own `Get-NewObjectPosition` (a set key decides by itself, an unrecognised value means `end`); the auto-validation call to the sibling `cf-validate.ps1` in the same `scripts` directory, with the validator's exit code propagated; processing instructions kept literal by the shared `Finalize-XmlText`.
+- **`cf-edit sort-childObjects`** (new): sorts `ChildObjects` by name inside a kind (1C tree order: case-insensitive, `_` < digits < letters, Latin before Cyrillic, ё = е). Empty value — all kinds except `CommonAttribute`, `Subsystem`, `CommandGroup`, `Language`, plus canonical order of the kind groups; a kind named explicitly is always sorted. Only values are swapped, indentation stays.
+- `cf-edit`: `Bot` sits after `DefinedType`, `PaletteColor` added to the kind order; a new kind group is inserted at its canonical place, not at the end of the block; operation values are case-insensitive; one-line JSON input errors; ISO dates stay strings on pwsh 7.5+; the save inherits the source's BOM / EOL / final newline.
+- `cf-init`: `-FormatVersion` (tested range 2.17–2.21, 2.18 / 2.19 accepted, outside = warning, non-numeric = error); 2.21 writes `TextToSpeech` and the `xmlns:pal` header; `CompatibilityMode DontUse` warns (the platform stores it as `Version8_3_8`); empty elements are self-closing.
+- `cf-validate`: **check 10** — every stamped `Ext/*.xml` body must carry the `Configuration.xml` version (the platform refuses mixed formats); check 1 warns outside 2.17–2.21 instead of rejecting 2.18 / 2.19; check 5 knows `Bot` / `PaletteColor`; enum values follow the platform (`MainClientApplicationWindowMode`: `Workplace`, `FullscreenWorkplace`, `EmbeddedWorkplace`; no `Fullscreen`).
+- All four: `[CmdletBinding(PositionalBinding=$false)]`, `ProviderPath` for UNC paths.
 
-Delta **dropped**: the fork's own `$byName` / `Test-OrderSensitiveType` ordering block. Upstream implements the same `newObjectPosition` ordering, including the order-sensitive kinds, and the two implementations cannot coexist in one file.
-
+Local deltas re-applied: `.dev.env` `SUPPORT_GUARD` first, fail-closed on an unreadable `ParentConfigurations.bin`, stderr notice when the guard itself fails; `.dev.env` `NEW_OBJECT_POSITION` first inside upstream's own `Get-NewObjectPosition` (upstream adopted the same `end|byName` design, so our separate copies of it, of `Compare-MetadataNames` and of `Test-OrderSensitiveType` were dropped); sibling `cf-validate` from the same `scripts` dir, its exit (or absence) is the exit code; the compact-tag pass also skips `<?…?>`. `sort-childObjects` is the only operation that reorders existing entries; default insertion still follows `NEW_OBJECT_POSITION`. Pinned by a new regression case.
 
 ### Local fix `2026-10-19` — `add-childObject` follows `NEW_OBJECT_POSITION`
 
@@ -86,38 +74,34 @@ The PowerShell scripts under `tools/1c-cf-manage/scripts/` were refreshed from [
 
 ## cfe-manage.md
 
-### Upstream sync `2026-10-28`
+### Local fix 2026-11-06 — a borrowed form follows Configurator on columns, ref types and missing source files
 
-Source `662e752e`. `cfe-borrow` v1.12 → **v1.58**, `cfe-validate` v1.5 → **v1.31**, `cfe-init` v1.2 → **v1.13**, `cfe-diff` v1.0 → **v1.8**, `cfe-patch-method` v2.5 → **v2.14**.
+`cfe-borrow` v1.58 → **v1.59**, `cfe-validate` v1.33 → **v1.34** (support ticket 9a17951b). In `-BorrowMainAttribute Form` a tabular section keeps only the columns a form path names, including `CurrentData`; a section named without a column is still borrowed whole. A composite type made only of references is written as `cfg:AnyIBRef` and those objects are not borrowed. `<FunctionalOptions>` are dropped from `AdditionalColumns` columns. A style file or a type's object missing from the export fails the call and is listed; the reference stays. A form borrowed without `-BorrowMainAttribute` warns that the data paths were removed. Check 12 treats `FieldSelectionBackColor`, `ReportGroup1BackColor` and `ReportGroup2BackColor` as platform styles. Pinned by `tools/tests/cfe-borrow-regression.ps1`.
 
-**`cfe-borrow` is upstream v1.58 taken whole, then the fork's contracts re-implemented on top.** v1.13…v1.58 is a rework of the very code the fork had patched (BaseForm indenting, choice-parameter link rewriting, adopted tabular sections, module handling, insertion order), so a hunk-wise merge of two implementations of one behaviour would have produced a file neither side had ever tested. What the fork contributed conceptually is now upstream's: the byte-vs-character `Configuration.xml` fix, BaseForm indentation, by-name section selection, `newObjectPosition` ordering, tabular-section column merging, dropped-link reporting.
+### Upstream sync 2026-11-01 (2e75b0f)
 
-Re-implemented deltas, each marked `Local:` in the file and covered by `tools/tests/cfe-borrow-regression.ps1` (**13/13**):
+Versions: `cfe-borrow` v1.12 → **v1.58**, `cfe-validate` v1.5 → **v1.33**, `cfe-patch-method` v2.5 → **v2.14**, `cfe-diff` v1.0 → **v1.8**, `cfe-init` v1.2 → **v1.13**. `cfe-diff`, `cfe-init` and `cfe-patch-method` had no local delta and were taken as is; `cfe-borrow` was rebuilt on upstream HEAD with the local deltas re-applied; `cfe-validate` is upstream HEAD plus its two local hunks. No sibling calls, Designer launches or `.v8-project.json` reads besides `newObjectPosition` (now `.dev.env` first). Every script got `[CmdletBinding(PositionalBinding=$false)]`.
 
-- `-BorrowMainAttribute Only` — the form is borrowed with its main attribute and **no cascade**: the borrowed attribute set is empty and every data path is stripped from both parts of the form (an empty binding root is passed to `Strip-FormBindings`). The validation accepts `Only` next to `Form` / `All`.
-- `<Type>` blocks of borrowed attributes and tabular-section columns are written the way the Configurator dump has them — one child element per line, one indent level deeper (`Format-TypeXml`); the form's own main attribute keeps its `<Type>` on a single line.
-- An element-level `CommandSet` (with its `ExcludedCommand` list) is kept in the form and in `BaseForm`; upstream drops every nested `CommandSet`.
-- No empty `Module.bsl` is created for a borrowed form, and no empty `Ext/Form` directory is left behind — the Configurator creates neither, and an empty module makes later `form-edit` / `remove-form` runs treat the module as existing.
-- A borrowed `Document` carries an empty `<RegisterRecords/>` after its properties.
-- References to styles that stayed in the source configuration are stripped from `AutoCommandBar`, `ChildItems` and the form properties (platform style items such as `ImportantColor` stay), so the extension does not fail to load with «элемент стиля не найден».
-- An unknown sub-object is refused with a single-line `[ERROR] Source attribute not found: <name>` on stderr — `Write-Error` wrapped the line and prefixed the script path, which broke the operator-facing text.
+Behaviour that changes for the agent:
 
-Delta dropped: the internal `-BorrowMainMode` / `-KeepObjektBindings` switches (undocumented, superseded by upstream's `$mainAttrName` model).
+- **Shells load** (8925bd58, 902b643a): `<ChildObjects/>` for data processors, reports, document journals, HTTP / web services, subsystems and the other container kinds; full generated-type sets (`Characteristic` of a chart of characteristic types, chart-of-accounts and calculation-type sets, `Manager` of sequences, filter criteria, settings storages, integration services, WS references).
+- **Re-borrow never rewrites** an already borrowed object (8fe727e3); `-Module ObjectModule,ManagerModule,…|None` creates empty modules with their `PropertyState` mark (format 2.19+); merges insert only into the object's own `ChildObjects` (b5662a38). The form `PropertyState` (`Form` / `Extended`) is now written from 2.19 only — the platform drops it below.
+- **`-BorrowMainAttribute` is generalized** (d3ea8262, e570ee84, 3fafa099, 83bb5b6f, a424e9cd, c9272cf7, c0e20f75, ecd6010c, 53ee51a3): the source main attribute is copied whole (`Объект`, `Список`, `Запись`, … with `UseAlways` / `Columns`), attributes come from the object in its type, the dynamic-list query text counts as a reference, deep paths borrow each target object with its sub-attribute, standard-field properties are carried, `NumberPeriodicity` is not (otherwise `/UpdateDBCfg` fails), list fields get `~` when the list does not resolve in the extension. The value is now required (03161e1c).
+- **Common forms** are borrowed with their content (fdd3bfa4); `cfe-patch-method` accepts `CommonForm.X` (11307082), `cfe-diff` sees its interceptors (d070d65c).
+- **Subobjects without a form** (a67314ec): `Type.Name.<Kind>.<Name>` for `Attribute`, `TabularSection` (no columns), `Dimension`, `Resource`, `AddressingAttribute`, `AccountingFlag`, and `TabularSection.T.Attribute.A`. The whole batch is resolved before anything is written; a refusal names the missing child (`Attribute 'X' not found in Document.Y. Extension not changed`).
+- **Form body**: element pictures are copied as files (65106509), the `<Form>` / `BaseForm` tag carries the extension's version (53c1d59e), properties naming a form attribute are dropped, conditional appearance is copied.
+- **`cfe-validate`**: 13 → 19 checks — GeneratedType completeness and own objects / subobjects the platform will not add (9, 10), `AdditionalColumns` without a section (12), data paths of every extension form against the extension's objects (14), default roles with rights on borrowed objects (15), module / `PropertyState` agreement (16), format-version agreement (17), comparison with the source configuration via the new `-ConfigPath` (18), references to objects missing from the extension (19). A borrowed element without `ExtendedConfigurationObject` is now one summarized warning.
+- **`cfe-patch-method -Check`**: the platform's comparison rule (case and inter-token whitespace count, blank lines and indentation do not), parameter-count drift, marker lines with trailing comments, English BSL (533dd0de, d4832ce3, 1b2c9388, 9b1bf22e). **`cfe-diff`** knows `HTTPService`, `WebService`, `XDTOPackage`, `Style`, `WSReference`, `Bot` (a0a91a4e). **`cfe-init`** takes the default language (name, UUID, `LanguageCode`) from the base configuration (39d3a8f4).
 
-The upstream harness for this tool reports **18/65**: the other 47 cases encode upstream's own variants of the behaviours above (multi-line form-attribute `<Type>`, mandatory `Module.bsl`, `CommandSet` stripping, different `RegisterRecords` handling). Our contract suite is the authority here — it encodes what our projects load and what the Configurator writes.
+Local deltas re-applied: `<RegisterRecords/>` on a borrowed document; no empty `Module.bsl` for a borrowed form (object or common) and no check-11 warning for it; check 12 reports a missing `CommonPicture` / non-platform `StyleItem` as an ERROR; `-BorrowMainAttribute Only`; an unknown `style:` reference is stripped (now also scanned in the `AutoCommandBar` and form properties); Russian kind segments (`Реквизит`, `ТабличнаяЧасть`, …); `NEW_OBJECT_POSITION` from `.dev.env` (cfe-borrow now honours it in the extension's `ChildObjects`, default `end` as before). The `BaseForm` multi-line rule (10-01), the link encoder (10-28) and `Detect-FormatVersion` (10-18) equal upstream now.
 
-`cfe-validate` / `cfe-init` / `cfe-diff` keep the `.dev.env` platform chain and the sibling-validator dispatch; the new checks of v1.31 (form path roots, `AdditionalColumns`) are in.
+Deliberate deviations from upstream, each checked on 8.3.27.2130 by loading into a throwaway file infobase (`/LoadConfigFromFiles -Extension`, `/UpdateDBCfg`, `/CheckCanApplyConfigurationExtensions`, then `/DumpConfigToFiles` and a diff):
 
+- **Element `CommandSet`** (ticket 2b392369, against 0737a795 / fdd3bfa4): kept with its `ExcludedCommand` list while the element keeps its `DataPath` — the round-trip dump keeps it. The 10-19 rule "always keep" was narrowed: in a skeleton form the table loses its binding, and the platform rejects its `Add` / `Copy` («Неверное имя команды элемента формы»), so an unbound element's set is dropped whole, as upstream does.
+- **`<Type>` layout**: borrowed attributes and columns keep the source line layout — byte-equal to the round-trip dump; upstream writes `<Type>` on one line.
+- **`Only`**: the copied main attribute loses `UseAlways` / `Columns` (they name attributes `Only` does not borrow); a main-attribute object other than the owner is borrowed as a shell.
 
-### Upstream sync `2026-10-28` — `cfe-patch-method` v2.5 → **v2.14**
-
-Source `662e752e` (same commit as the tier-1 database tools). **No local deltas**: the vendored copy was byte-identical to the pinned script, so this is a plain refresh plus `-Check`/`-Actualize` behaviour that the docs already promised but the old script did not deliver.
-
-- `-Check` now compares the **parameter list** and the return type of every controlled method against the current original, not only the unmarked body — a vendor parameter rename is caught while the body still matches.
-- The comparison key follows the platform's measured rule (case-insensitive marker counter; the marker line is returned unchanged), so a re-run no longer reports phantom drift.
-- BSL keywords are recognized in both spellings (`And`/`Or`/`Not` beside `И`/`Или`/`НЕ`), including `Или` inside the keyword table.
-- Interception of a **common form's own module** is supported: `-ModulePath "CommonForm.<Name>"`.
-- Borrowed-object modules and the extended-property mark are handled by `cfe-borrow`/`cfe-validate` in the same family.
+Tests: `tools/tests/cfe-borrow-regression.ps1` 13 → 18 cases (re-borrow and `-Module`, merge into the own `ChildObjects`, data-processor and chart-of-characteristic-types shells, `.dev.env` `byName`; the CommandSet case now covers both bound and unbound tables). Fixture updates: the extension shell `Catalog.Zeta` got its full generated-type set (the new check 9 flagged it), the base form's table is bound to `Объект.Tovary` (a table without `DataPath` cannot exclude `Add` / `Copy`), `DataProcessor.Obrabotka` and `ChartOfCharacteristicTypes.VidySvoystv` were added. Two assertions follow upstream text: the subobject refusal message and the multi-line main-attribute `<Type>`.
 
 ### Local fix `2026-10-28` — choice-parameter and type-link paths
 
@@ -182,37 +166,35 @@ An extension is the **default answer** when a typical object on vendor support n
 
 ## db-manage.md
 
-### Upstream sync `2026-10-28` — the rest of the family
+### Upstream sync 2026-11-01 (2e75b0f)
 
-Source `662e752e`. `db-create` v1.10 → **v1.21**, `db-dump-cf` v1.12 → **v1.23**, `db-dump-dt` v1.11 → **v1.22**, `db-load-cf` v1.13 → **v1.25**, `db-load-dt` v1.12 → **v1.23**, `db-run` v1.7 → **v1.16** (the four tools of the first pass are described above).
+Scripts under `tools/1c-db-ops/scripts/` refreshed from upstream `2e75b0f`: `db-create` v1.10 → **v1.21**, `db-dump-cf` v1.12 → **v1.23**, `db-dump-dt` v1.11 → **v1.22**, `db-dump-xml` v1.14 → **v1.29**, `db-load-cf` v1.13 → **v1.25**, `db-load-dt` v1.12 → **v1.23**, `db-load-git` v1.18 → **v1.36**, `db-load-xml` v1.19 → **v1.38**, `db-run` v1.7 → **v1.16**, `db-update` v1.14 → **v1.28**; new **`db-cfe-admin` v1.8** (section 11). `install-files-update.ps1` is our own tool and was not touched.
 
-The same two deltas as the first pass: `.dev.env` (`PLATFORM_ARGS` / `IBCMD_ARGS` / `PLATFORM_PATH`) ahead of `.v8-project.json`, and `PLATFORM_PATH` accepted in the install-directory shape with the `bin\1cv8.exe` fallback. Upstream's own change of this release — the database record's `v8path` wins over the root one, which is why six scripts now consult `Find-ProjectDatabase` first — is kept.
+Behaviour changes:
 
+- **No false exit 0** (eb1796ef): a top-level `trap { …; exit 1 }` — an unhandled error inside `try/finally` used to end the script with code 0 and no platform run (reproduced on PS 5.1).
+- **No hang on 8.5** (ff894f29, 1c04962b, 3d54652b): the platform is started by a small C# `PlatformProcess` with an explicit inherited-handle list, so `crashpad_handler` cannot hold the caller's pipe; `Process.Start` fallback when `Add-Type` is blocked.
+- **Load mode from the list** (989f4c55): `db-load-xml -Files` / `-ListFile` without `-Mode` is a partial load on 1cv8 too (it was `Full` and replaced the whole configuration). `db-dump-xml -Objects` / new `-ObjectsFile` always means `Partial`; `Changes` is `-update` without `-force` (f98e7e9e), a first dump into an empty directory is `Full`, a dump without `ConfigDumpInfo.xml` is refused.
+- **`-AllExtensions` with a file list is refused** (647c633a) in `db-load-xml` / `db-load-git`.
+- **Silent rejections** (a024b7da): `Find-SilentRejections` (8 patterns, incl. «Для работы с конфигурацией необходима версия платформы не меньше») in `db-load-xml`, `db-load-git`, `db-update`; `db-load-git` reports deletions it cannot apply (80618f0b).
+- **Smuggled batch commands** (59438282): `V8BatchKeys` refuse `/CheckConfig`, `/DeleteCfg`, … in `PLATFORM_ARGS` / `-AdditionalV8Arguments`; `/ConfigurationRepositoryP` is a secret key in every copy.
+- **Repository credentials** (478e7489, 19d62afb): `db-load-xml`, `db-load-git`, `db-dump-xml`, `db-update`, `db-cfe-admin` pass `/ConfigurationRepositoryF/N/P`; three repository hints in the loaders.
+- **Relative paths** (8d9e6c46, c4429ba9, 593b58b0): only absolute paths reach the platform. `[CmdletBinding(PositionalBinding=$false)]` and `ProviderPath` everywhere.
 
-### Upstream sync `2026-10-28` — the four tier-1 database tools
+Local deltas re-applied (one variant of every shared function across the family, `db-*` / `epf-*` / `stub-db-create` / `db-cfe-admin`):
 
-Source: `Nikolay-Shirokov/cc-1c-skills` at `662e752e` (2026-10-28), three months of commits past the `ecd289fe` pin. Ported by three-way merge (`git merge-file`, base = the pinned script), one tool at a time, with every local delta re-applied on top. Versions: `db-dump-xml` v1.14 → **v1.29**, `db-load-xml` v1.19 → **v1.38**, `db-load-git` v1.18 → **v1.36**, `db-update` v1.14 → **v1.28**.
+- `.dev.env` first in `Get-ProjectExtraArgs`, `Find-ProjectV8Path` (order: `-V8Path` → `PLATFORM_PATH` → record `v8path` → root `v8path` → auto-detect) and the install-dir → `bin\1cv8.exe` substitution; the `.dev.env` directory is also a project root for relative infobase paths. New: `REPOSITORY_PATH` / `REPOSITORY_USER` / `REPOSITORY_PASSWORD` before the registry record (main configuration only; an extension repository stays registry-only). Passing them to an unbound infobase is harmless (8.3.27.2130).
+- `/DumpResult` on every Designer launch, now through one shared `Get-DumpResultError`, including the new launches: the applicability check, `db-cfe-admin`.
+- `db-update -Dynamic`: upstream's `on/off/yes/no/+/-` plus our `auto/disable`. Log failure lines raise the exit code (not only with `-StrictLog`): the 8 upstream patterns plus «Ошибка [при] обновлени… конфигурации базы данных».
+- Repository hints point at `1c-repository-manage` and `.dev.env` instead of upstream `/db-repo` / `.v8-project.json`.
 
-Why these four first: they are on the hot path of every project, EDT included — `/loadfrom1cbase`, `/getconfigfiles`, `/update1cbase` and `/deploy-and-test` drive them regardless of source format, unlike the XML metadata tools.
+Deliberate deviations from upstream:
 
-Behaviour that changed for our workflows:
+- **Extension applicability check is opt-in** (`-ApplyCheck`; `.v8-project.json` `extensionApplyCheck: true` as fallback): `/update1cbase` Step 2c is the gate, so `db-load-*` / `db-update` do not add a second Designer pass by default. With `-ApplyCheck` a refusal exits 1.
+- **`db-cfe-admin`**: `-Extension` alias of `-Name`; `delete` / `set-properties` need `-Force`, `-DryRun` prints the plan, neither → exit 2. `/DeleteCfg -Extension ""` deleting the first extension was reproduced on 8.3.27.2130 and added to `designer-batch-checks.md → Never run these switches`.
+- Not ported: upstream `db-repo` (our `1c-repository-manage` owns repository operations), the Python ports of `db-*`, CRLF-only fixes.
 
-- **Platform launch** — the platform is awaited until it exits, not until its pipes close; inherited descriptors are passed explicitly; a failure *before* the launch is no longer reported as success; a batch command embedded in `AdditionalV8Arguments` is rejected instead of silently swallowing the real one.
-- **`db-dump-xml -Mode Changes`** — no `-force` any more: a dump-format-version mismatch surfaces as a platform refusal instead of a silent full re-dump that the caller reads as an incremental export. An object list (`-Objects` / `-ObjectsFile`) makes the run partial by itself.
-- **`db-load-xml`** — `-Files` / `-ListFile` imply `Partial`; `-AllExtensions` with a partial load is refused on both engines; after an extension load the platform is asked whether the extension is applicable (`/CheckCanApplyConfigurationExtensions`, separate launch — one command line executes only its last batch command).
-- **`db-load-git -DryRun`** — warns about deletions a partial load cannot apply (and exits non-zero when they are the only changes), and warns that a `Configuration.xml` in the list means a full load.
-- **Registry/`.v8-project.json` (not used here)** — `-RepositoryPath/User/Password`, `-ObjectsFile`, per-database `v8path`, `v8args`; new `-StrictLog` / `-NoApplyCheck` switches. `.dev.env` still wins over the registry (below).
-
-Local deltas re-applied (unchanged in intent from `NOTICE.md`): `.dev.env` first in the extra-args lookup (`PLATFORM_ARGS` / `IBCMD_ARGS`) and in the v8path lookup (`PLATFORM_PATH`); `PLATFORM_PATH` accepting the install directory with a `bin\1cv8.exe` fallback; `/DumpResult` appended to every batch launch and read as the batch verdict next to the exit code.
-
-Local deltas re-worked:
-
-- **`db-update` silent rejections** — upstream replaced the fork's own pattern scan with `Find-SilentRejections` (a wider list, minus the generic `Ошибка обновления конфигурации базы данных` header, and gated on `-StrictLog`). The wider list and the new extension apply-check are taken; the generic header is re-added, and the fork's **hard** escalation is kept — a log rejection fails the run regardless of `-StrictLog`. Verified: the doc and `designer-batch-checks.md` promise a non-zero verdict, so a warning-only path would have been a regression.
-- **`db-update -Dynamic auto|disable`** — dropped. Upstream's own fix accepts `on` / `off` / `yes` / `no`, so the `-File`-safe spelling exists upstream (`-Dynamic off` → `-UpdateDBCfg -Dynamic-`, checked on 8.3.27). Two spellings for one thing is worse than one.
-
-Verification (real platform, 8.3.27.2130, throwaway file base in the scratch directory): PowerShell parse of all four scripts; `db-create` → `db-dump-xml -Mode Full` → `db-load-xml -Mode Full -UpdateDB` → `db-update -Dynamic off`, all exit 0 with the `/DumpResult` verdict read; `db-load-git -DryRun` on a fixture git repo exercised the `Configuration.xml` full-load warning and the deletion warning + refusal. `.dev.env` resolution was exercised implicitly (no `-V8Path` passed, `PLATFORM_PATH` came from the project). No db tool has a Python port, so `tools/tests/python-ports-regression.py` is unaffected.
-
-The `NOTICE.md` pin stays at `ecd289fe`: the other 64 scripts were not re-synced, and a pin is a property of the tree, not of four files. Their source commit is recorded in `NOTICE.md` per file.
+Pinned by `tools/tests/db-tools-regression.ps1` (fake `1cv8.exe`, no platform). Live on throwaway file bases in `%TEMP%`: 8.3.27.2130 — `db-create`, full and partial `db-load-xml`, `db-update`, `db-dump-xml` (`Changes`, `-Objects`), `db-load-git`, `db-cfe-admin list / check / delete`; 8.5.1.1522 — `db-create` + `db-dump-cf` through a pipe return at once (the hang itself did not reproduce: a `crashpad_handler` was already resident).
 
 ### Local fix `2026-10-20` — `-Dynamic` takes `auto` / `disable`
 
@@ -232,14 +214,17 @@ The PowerShell scripts under `tools/1c-db-ops/scripts/` were refreshed from [Nik
 
 ## epf-manage.md
 
-### Upstream sync `2026-10-28`
+### Upstream sync 2026-11-01 (2e75b0f)
 
-Source `662e752e`. `epf-build` v1.12 → **v1.26**, `epf-dump` v1.11 → **v1.22**, `epf-validate` v1.2 → **v1.11**, `epf-init` v1.1 → **v1.9**, `erf-init` v1.1 → **v1.9**.
+`epf-build` v1.12 → **v1.26**, `stub-db-create` v1.7 → **v1.17**, `epf-dump` v1.11 → **v1.22**, `epf-validate` v1.2 → **v1.12**, `epf-init` v1.1 → **v1.9**, `erf-init` v1.1 → **v1.9**.
 
-Deltas kept: the `.dev.env` platform chain in the three `epf-*` tools; the PowerShell-7-safe stub launcher (`$psExe` — `pwsh` under Core) in `epf-build`, on top of upstream's reworked wait (the stub itself is awaited, not `-Wait` on a process tree that a leftover crashpad child would hold); `-FormatVersion` and the fork's `-BspForms` switch side by side in `erf-init`.
+- **Source check before the build** (448f05ed, 06bdee3e, 63634466, e2c7f385): the processor is embedded into a stub configuration and `/CheckConfig` runs first; `-Checks`, `-Context`, `-ConfigSrc`. On by default as upstream; ~11 s against ~4–5 s with `-Checks off` for a minimal processor on 8.3.27.2130.
+- **`stub-db-create`** (beaa75c7, 614206bc): format version and compatibility mode come from the sources; logs live in the unique stub directory.
+- **`epf-validate`** (5d1b5cdf, fbcf65e1): `Command` in `ChildObjects` and `Ext/ManagerModule.bsl` are errors; check 11 — format version of stamped bodies.
+- **`epf-init` / `erf-init`** (974ca3aa, 3ef9e76f): synonym XML-escaped; `-FormatVersion`.
+- `trap`, `PlatformProcess` and the stub launched with `Start-Process -PassThru` + `WaitForExit` instead of `-Wait` (8.5 hang), as in the `db-manage.md` entry above.
 
-Upstream absorbed the fork's save pipeline in `epf-init` / `erf-init` (`write_xml_file` / `write-bom` helpers).
-
+Local deltas re-applied: `.dev.env` first (as in `db-*`); `/DumpResult` on the build, the `/CheckConfig` pre-check and the stub's `/LoadConfigFromFiles` / `/UpdateDBCfg`; the stub runs under `pwsh` on PowerShell Core; the 2026-10-07 common-forms delta (`epf-validate` check 5, `stub-db-create` stubs — now stamped with the stub format version, `erf-init -BspForms`) — checked with the pre-check on: an `erf-init -BspForms` report builds on 8.3.27.2130. Deviation: common modules for the pre-check come from `.dev.env` `EXPORT_PATH` before the registry `configSrc`, and the printed check command line is masked.
 
 ### Local fix `2026-10-07` — common forms in external reports
 
@@ -269,34 +254,41 @@ The PowerShell script `tools/1c-epf-validate/scripts/epf-validate.ps1` was refre
 
 ## form-manage.md
 
-### Upstream sync `2026-10-28` — `form-info`
+### Local fix `2026-11-08` — registering a ready form, `autoEditMode`
 
-Source `662e752e`. `form-info` v1.5 → **v1.14**. No local delta beyond the processing-instruction branch of the shared compact-tag writer.
+Support request: extension changes carried onto a new vendor dump (format 2.21, 8.5.1) where the custom form already exists in the previous version.
 
+- **`form-add -RegisterExisting`** (PowerShell only): the descriptor `Forms/<Name>.xml`, `Ext/Form.xml` and `Ext/Form/Module.bsl` must all exist; the form is added to the owner's `ChildObjects` and nothing else is written — no form file, no uuid, no `Default*Form` slot, even an empty one. Refused (exit 1, nothing written): a missing file, a path outside the owner's `Forms` or through a symlink / junction, a descriptor that is not `MetaDataObject/Form`, whose `Properties/Name` differs from `-FormName`, or whose uuid is invalid or already used by the owner or another of its forms, a `Form.xml` that is not a managed form. `-SetDefault` / `-Synonym` / `-Purpose` with it are exit 2. Already registered — exit 0 without a write. A descriptor or `Form.xml` in another format than the owner is a `[WARN]`. Ordinary creation over an existing descriptor is refused as before.
+- **`autoEditMode`** for `input` in `form-edit` (add and `set`) and in `form-compile.ps1`: `<AutoEditMode>true|false</AutoEditMode>`. The property exists only in the 2.21 logform XSD (`Field`, `xs:boolean`, no default, after `CellMark` and before the `InputField` part that starts with `Width`), so it is added to the `InputField` child order of both emitters between `FooterPicture` and `Width`; `form-validate`'s copy of the order is not changed (its check 16 skips the tag). A non-boolean value and a form of format < 2.21 are refused (exit 1, nothing written); `null` in `set` removes the tag. Before, the key was reported as «unknown key … ignored». `form-compile.py` does not know the key yet.
 
-### Upstream sync `2026-10-28` — `form-edit` v1.6 → **v1.39**, `form-validate` v1.10 → **v1.36**
+Verified with a synthetic 2.21 test set under Windows PowerShell 5.1 (registration, repeat, missing file, name mismatch, traversal, conflicting switches, ordinary creation; `autoEditMode` true / false on add, `set` true → false → `null`, non-boolean, 2.20 form, `form-compile`), `meta-validate` / `form-validate` on every result; no case in `tools/tests` yet.
 
-Source `662e752e`. Both tools grew far past the pin (form-edit 1 549 → 9 535 lines: the element emitter is now shared with `form-compile`, a per-element event catalogue with handler stubs, `set`/`rename`/`remove` operations, form properties, conditional appearance, command interface).
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Local deltas dropped as **superseded** by upstream — each one is now upstream behaviour, verified against the new code:
+Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) `2e75b0f`: `form-compile` v1.176 → **v1.224** (both runtimes), `form-edit` v1.6 → **v1.46**, `form-validate` v1.10 → **v1.39**, `form-info` v1.5 → **v1.14**, `form-add` v1.12 → **v1.34** (both runtimes), `remove-form` v1.4 → **v1.11** (both runtimes, reference check only). `tools/1c-form-compile/form-dsl-spec.md` is re-merged with upstream `docs/form-dsl-spec.md`. The scripts read no new data files: the event catalog, handler-stub templates, enum sets and child-tag orders are embedded; `presets/erp-standard.json` is unchanged upstream and keeps the local posting properties.
 
-- the event-suffix map and `knownEvents` additions (`OnEditEnd` → `ПриОкончанииРедактирования`, `Selection` → `Выбор`, `DragEnd`, `Tuning`, `StartListChoice`): upstream ships a per-element event catalogue with the Russian names, signatures and stub generation;
-- button/command child order and `Command.Representation = TextPicture`: upstream has `childTagOrder` / `formRootTagOrder` tables and per-element enumeration maps with the `PictureAndText ↔ TextPicture` aliases;
-- the `Module.bsl` handler check (local 13): upstream **Check 22** does it better — events, command actions, borrowed-form scope, dead-code warnings.
+Behaviour changes to expect:
 
-Local deltas kept:
+- **Handler stubs in `Module.bsl`** — `form-compile` and `form-edit` append an empty procedure (catalog directive and parameters, BSP region) for every bound handler the module lacks; no switch. `content/rules/form-module.md` and `forms.md` tell the agent to expect it.
+- **Event catalog** from vendor configurations replaces the hand lists: per-element handler suffixes (`Selection` → `Выбор`, `OnEditEnd` → `ПриОкончанииРедактирования`, `DragEnd` → `ОкончаниеПеретаскивания` — the local suffix fixes are upstream's now), `[WARN]` for an event of another element, an 8.5-only event or a dynamic-list-only event.
+- **Enum values by XSD** (7c1a3318, 14f1126b, afd863a4, 24429b46): case fixed silently, synonyms mapped (button `TextPicture` ↔ command `PictureAndText`, `single` → `SingleRow`), unknown value refused, platform defaults not written; button / command children in platform order (bd0081c2); `Enum.X.EnumValue.Y` design-time values fixed and checked (6b00da9a, 9181692f, check 26); no `RowPictureDataPath = <List>.DefaultPicture` on a dynamic list with an explicit `keyType` and no `mainTable` — «Неверный путь к данным» (0bba1719).
+- **Usual group without `showTitle`** hides its title unless `title` / `titleDataPath` is set (af28bbb8, 36ae6195, 5f9490b2); `form-compile.py` no longer breaks on Python < 3.12 (5f9490b2), reads DSL keys case-insensitively (57b0f95b), refuses a cp1251 JSON file instead of mangling it (229e66b9) and registers the form in the object's top-level `ChildObjects`, not a tabular section's (11602f8b).
+- **`form-edit` 1.46** — move / set / remove / rename of elements, attributes, commands, parameters and columns, form title / properties / events / excluded commands / conditional appearance / command interface; elements by the `form-compile` emitters; extension handler names with prefix and call type (cd1cf252).
+- **`form-add`** — purpose table per kind: `Folder`, `FolderChoice`, `RecordSet`, `Save`, `Load`, `Custom`, document journals (`List` → `DefaultForm`, no more `cfg:.Журнал`), accumulation / accounting / calculation registers, external-source tables (45353afc, 53fc16d2, fb211a61); empty `-Purpose` = the kind's primary form. An information register has no `Object` purpose any more — use `Record` (the main attribute is `Запись`, which was the local fix).
+- **`form-info -Handlers`** (7d776798) — handler line ranges in `Module.bsl`.
+- **`form-validate`** — upstream checks 13, 15–27 and the reworked version check 14: the form must match its descriptor `Forms/<Name>.xml` and the `<BaseForm version>` stamp (c943acef, b20276fa); a mismatch with the rest of the dump is only a warning. A command without `Action` and an `AutoCommandBar` id ≠ −1 are warnings now (e1d5d1f9, af00aa47).
 
-- `.dev.env SUPPORT_GUARD` before `.v8-project.json` `editingAllowedCheck` (vendor support gate) — verbatim from the other mutators.
-- form-edit's **DynamicList source refusal**: a `DynamicList` attribute with neither `settings.mainTable` nor `settings.query` is still rejected before writing. Upstream fills a `MainTable` heuristically but never refuses the empty case, and the form does not open.
-- form-validate **Check 12**: `cfg:Catalogs.X` — an export folder name where a type belongs — is an error, not an "unrecognized prefix" warning.
-- form-validate **Check 12b**: the main attribute of a default object / record form belongs to the owner; a zero-length `Description` / `Code` is not bound.
-- form-validate **Check 26** (was 13): duplicate declaration (error), missing compilation directive, wrong context and handler arity. The "handler not found" branch was **removed** so Check 22's finding is not reported twice.
-- form-validate **Check 27** (was 14): `РеквизитФормыВЗначение` / `ЗначениеВРеквизитФормы` require the form context on the server.
-- form-edit **compact empty tags in literal XML text** — upstream's writer compresses ` />` → `/>` and protects CDATA and comments but **not** processing instructions, so a `<?…<Tag />…?>` was rewritten. The fork's alternation keeps `<?…?>` as well; without it the port silently reintroduced the defect our own regression case pins (it caught this one).
+Local deltas re-applied: `.dev.env` `SUPPORT_GUARD` and fail-closed guard in every form script; `-FromObject` guard target `Ext/Form.xml`; from-object `ChoiceMode` on the document choice form, document item preset `AutoTime` / `UsePostingMode` / `RepostOnWrite` in Configurator order, `Description` only when `DescriptionLength > 0`, `[WARN]` on a missing `Configuration.xml`; the one event normalizer (standalone `handlers`, refusal on two spellings and on a `handlers` key absent from `on`) in both `form-compile` runtimes; injection-safe registration lookup; processing instructions protected by the compact-tag pass in `form-compile`, `form-edit`, `form-add` (upstream protects CDATA and comments only); `form-edit` refusal of a `DynamicList` without `mainTable` / `query`; `form-add` `-FormName` identifier check and XML escaping; `remove-form` hardening unchanged.
 
-Verification: upstream's own snapshot harness (`tests/skills/runner.mjs`, PowerShell runtime) run against the ported files in a hybrid skills tree — `form-edit` **117/117**, `form-validate` **58/58** (2 skipped by fixture prerequisites). Five extra cases authored for the kept deltas (DynamicList without source, duplicate handler, client-context conversion, export-folder type, client event on a server procedure) pass alongside them: **63/63**.
+`form-validate` numbering, merged: upstream numbers stay; local checks get numbers after upstream's last — **12b → 28** (owner of a default form), **14 → 29** (`РеквизитФормыВЗначение` context). Local **13** is merged into upstream **22**: a missing handler is now an **error** (upstream severity), duplicate declaration (error), missing / wrong directive and arity (warnings) are kept. Local **15** (`Representation`) is covered by upstream **15** and dropped; local **1** (version against `Configuration.xml`) is replaced by upstream **14**. `export folder name` stays inside 12, the DynamicList-without-source error stays among the unnumbered checks.
 
-`tools/tests/metadata-tools-regression.ps1` needed its `form-validate` case updated to the new contract — the handler checks are now numbered 26 / 27, a missing handler is **Check 22's error** rather than a warning (the platform raises "method not found" when the form opens), and the format-version finding names the form descriptor instead of `Configuration.xml`. The compact-tag case (`form-edit` inside a processing instruction) stayed as it was and is what exposed the missing delta above.
+Deliberate deviations from upstream:
+
+- **Unknown events**: an event name that no element has in the catalog is refused (exit 1, no file) in `form-compile` — upstream warns. Catalog-known events of other elements, 8.5-only and dynamic-list-only events keep upstream's `[WARN]`. `form-edit` keeps upstream's warning.
+- **`remove-form`**: only 93d9511a is taken (full-reference match — the old `Form.<Name>` tail match blanked `DocumentJournal.J.Form.<Name>` and `CommonForm.<Name>` slots — and the configuration-wide scan). Upstream's `-Force` also cleans the foreign references; here `-Force` stays the deletion gate after `-DryRun`, foreign references block it with exit 2, and the new `-CleanReferences` switch clears them inside the same quarantine transaction (backups of every touched file, link-free path chain checked). Without `Configuration.xml` the object's own directory is scanned and a `[WARN]` says so. Upstream's delete-first order and its implicit cleaning are not taken.
+- `form-add` / `form-compile` / `form-edit` keep upstream's XmlWriter save but with the processing-instruction branch of the local compact-tag fix.
+
+`tools/tests/python-ports-regression.py` gained cases for enum spelling and button / command order, journal and record-set forms, and the foreign-reference block / clean (both runtimes each); `metadata-tools-regression.ps1` for the `form-edit` DynamicList refusal and the new check numbers. Verified live on 8.3.27.2130: a dump built with `cf-init` / `meta-compile` / `form-add` / `form-compile -FromObject` / `form-edit` loaded into a throwaway file infobase with `/LoadConfigFromFiles` + `/UpdateDBCfg`; the dumped-back choice and list forms were identical to the generated ones.
 
 ### Local fix `2026-10-14` — input-field events and pass-through keys
 
@@ -369,38 +361,17 @@ In addition to the form-compile / form-info / form-add / form-edit / form-remove
 - **Presets** — `tools/1c-form-compile/presets/erp-standard.json` is shipped; project-level override at `<projectRoot>/presets/skills/form/<name>.json`.
 - **Defaults aligned with real ERP/БП forms** — multi-line inputs are not auto-width-bounded by default; checkbox title is on the right; `autoTitle` is suppressed when `title` is set; objects with editable state save the input state (`Esc → confirm`).
 
-### Upstream sync `2026-10-28` — `form-compile`
-
-`form-compile` v1.176 → **v1.217**. This one needed its own pass: upstream replaced the fork's hand-written event tables with a **generated event catalog** (`Get-FormEventCatalog`, built from 28.5k forms of the typical configurations and checked by loading into 8.3.24 / 8.3.27 / 8.5), added `callType` (`Before` / `After` / `Override`) for extension handlers, form-module handler stubs, and reworked the from-object presets. Fifteen conflicts, eleven of them semantic.
-
-Deltas kept (each marked `Local:` in the file):
-
-- the support-guard target is normalised for `-FromObject` (the real edit target is `Ext/Form.xml` inside the form directory) and resolved with `ProviderPath`;
-- an event name that is missing from the catalog is **refused** (`[ERROR] Unknown event … Known: …`, exit 1) instead of upstream's warning — a typo used to land in `Form.xml` and only surfaced when the Configurator opened the form;
-- the closed value sets of `windowOpeningMode` / `autoTime` / `usePostingMode` stay (upstream accepts any string and its spec listed values that do not exist — `Modeless`, `Current`, `Postings`, `Movements` — and the Configurator rejects such a `Form.xml` on load);
-- the canonical root-tag order (`$script:formRootTagOrder`) and the value table are both present.
-
-Verification: upstream harness **64/68** in isolation. The four remaining cases encode upstream's variants of our deltas (unknown event as a warning, enum value forgiveness) plus one preset property order and one catalog-warning case; our own `python-ports-regression` pins the parity that survived and records `form-compile.py` as lagging (see `docs/runtime-selection.md`).
-
-### Upstream sync `2026-10-28` — the scaffolds and `form-compile`'s neighbours
-
-Source `662e752e`. `form-add` v1.12 → **v1.34**, `add-template` v1.10 → **v1.30**, `add-help` v1.9 → **v1.26**.
-
-Deltas kept in `form-add`: the `-FormName` identifier gate (Phase 0 — the name becomes a file name, a directory name and an XPath literal), the `.dev.env SUPPORT_GUARD` gate, and **XML escaping of `-FormName` / `-Synonym`** in the generated descriptor. The escaping is not cosmetic: upstream interpolates the values verbatim, so an ordinary synonym `A & B` produced a descriptor no parser accepts — our own regression case caught it after the port.
-
-Delta **dropped** in `form-add`: the fork's "an information register's object form names its main attribute `Запись`". Upstream now carries a per-kind purpose table where the register purposes are `Custom` / `List` / `Record` / `RecordSet` — the record form is `Record` with `AttrName = "Запись"`, and `-Purpose Object` is refused for a register naming the allowed values. The fork's rule became wrong, not redundant.
-
-`add-template` / `add-help`: upstream absorbed the fork's whole save pipeline (MemoryStream post-processing, BOM strip, uppercase `UTF-8`, compact tags, target-EOL detection); only the processing-instruction branch had to be re-added.
-
-**`form-remove` (v1.4) is deliberately not re-synced.** The fork rewrote the tool — identifier validation, path containment, `-DryRun` / `-Force`, and a bounded transaction whose deletions are reversible renames into a quarantine — and that rewrite is pinned by `tools/tests/python-ports-regression.py` and by the metadata regression. Upstream's v1.5–v1.11 fixes (reference check before deletion, unified XML finalisation) are present in the rewrite or superseded by it.
-
-Verification: `form-add` **30/30** in the upstream harness, the compact-tag suite **11/11** (covers `form-add`, `remove-form`, `form-compile` registration, `add-template`, `add-help`, `skd-edit`), metadata regression **62/62**.
-
-### Cross-cutting fix `2026-10-28` — a JSON definition under PowerShell 7
-
-Six scripts read their JSON definition through `Write-Output -NoEnumerate $parsed`. Under PowerShell 7 that wraps a **non-array** in a `List<object>`, so the caller's `$def.PSObject.Properties` enumerated `List` members (`Capacity`, `Count`, …) instead of the JSON keys and every operation was reported as `Unknown operation: Capacity`. Windows PowerShell 5.1 returns the object unchanged, which is why the idiom survived. Fixed in `meta-edit`, `meta-compile`, `form-edit`, `role-edit`, `skd-compile`, `skd-decompile`: only arrays take the `-NoEnumerate` path. The harness runs `pwsh` first, so it is what surfaced here; `docs/runtime-selection.md` now states that PowerShell 7 is supported.
-
 ## help-manage.md
+
+### Upstream sync `2026-11-01` (`2e75b0f`)
+
+`help-add` v1.9 → **v1.26**.
+
+- `Help.xml` takes the **owner's format version**: the object descriptor first (EPF / ERF root included, trailing slash in `-ObjectName` handled), then `Configuration.xml`; it used to be 2.17 for every EPF / ERF.
+- `-Lang` is validated before any write: letters, digits, `-`, `_` only, Windows device names refused — `-Lang ../../x` no longer writes outside `Ext/Help`.
+- An existing `Help/<lang>.html` is kept when `Help.xml` is missing (it used to be overwritten by the skeleton with exit 0); paired `<meta>` / `<link>` in the page.
+
+Local: `.dev.env` `SUPPORT_GUARD` first with fail-closed parsing; `<?…?>` skipped by the compact-tag pass; `[CmdletBinding(PositionalBinding=$false)]` added (upstream left this tool without it). The doc's `-ProcessorName` call was wrong — the parameter is `-ObjectName`. Regression cases: EPF stamped 2.20, refused `-Lang` traversal / device name.
 
 ### Upstream sync `2026-07-30`
 
@@ -408,12 +379,14 @@ Script refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay
 
 ## interface-manage.md
 
-### Upstream sync `2026-10-28`
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Source `662e752e`. `interface-edit` v1.8 → **v1.24**, `interface-validate` v1.1 → **v1.6**.
+`interface-edit` v1.8 → **v1.26**, `interface-validate` v1.1 → **v1.7**.
 
-Deltas kept: the `.dev.env SUPPORT_GUARD` gate, the sibling validator in `$PSScriptRoot` with its exit code propagated, processing instructions kept literal. Upstream's target-EOL detection — an edit inherits the destination's line endings — replaces the fork's own: same rule, one implementation.
+- `interface-validate` **check 14**: the file's format version equals its owner's (subsystem descriptor or `Configuration.xml`) — ERROR; differs only from the rest of the dump — WARN. `-Detailed`; a `-MaxErrors` stop is reported.
+- `interface-edit`: operation values case-insensitive, more Russian kind names, `Detect-FormatVersion` measures characters (a short Cyrillic `Configuration.xml` no longer throws), the save inherits BOM / EOL.
 
+Local deltas re-applied: `.dev.env` `SUPPORT_GUARD` first with fail-closed parsing; sibling `interface-validate`, its exit is the exit code; `<?…?>` skipped by the compact-tag pass.
 
 ### Upstream sync `2026-07-30`
 
@@ -426,35 +399,32 @@ The PowerShell scripts under `tools/1c-interface-manage/scripts/` were refreshed
 - **`interface-edit`** — operations `place` / `order` accept the value as an object (not only as a string). Command names in `hide` / `show` / `place` / `order` are normalised: `Catalogs.X` and `Справочник.X` map to canonical `Catalog.X`.
 - **`interface-validate`** — universal validator improvements (one-liner output by default, `-Detailed`, folder path auto-resolution) — see `role-manage.md` → "Recent Additions".
 
-
 ## meta-manage.md
 
-### Upstream sync `2026-10-28` — `meta-remove`
+### Local fix `2026-11-08` — `meta-edit import-attribute`
 
-Source `662e752e`. `meta-remove` v1.5 → **v1.15**, keeping the `.dev.env SUPPORT_GUARD` gate.
+Support request: an attribute of the previous version has to move onto a new vendor dump (format 2.21, 8.5.1) with its uuid; `add-attribute` gives a new uuid, which stays correct for a new attribute. `meta-edit.ps1 -Operation import-attribute -SourceFile <previous object XML> -Value <Name>` (batch with `;;`) copies the source's native `<Attribute>` element as it is, uuid and every property included, after the last attribute of the target. Refused with exit 1 and nothing written: source and target are not the same object (kind and name; the object uuid is not compared), the same file, a source attribute that is missing or has an invalid uuid, a target attribute of that name with other content, the name taken by another child, the uuid already used anywhere in the target file (attribute `uuid`, `xr:TypeId` / `xr:ValueId`), a namespace prefix the attribute uses that the target root declares differently. A target attribute identical to the source (up to line endings) is skipped; when nothing is left to import the file is not written and the run exits 0. The save path is the usual one (BOM, target EOL, compact tags), the support guard and the `meta-validate` gate apply; if `meta-validate` fails after the write, the target's original bytes are written back and its exit code is returned. There is no configuration-wide uuid check in `meta-edit` — run `uuid-check` on the dump. `meta-edit.py` does not have the operation yet.
 
+Verified with a synthetic 2.21 test set under Windows PowerShell 5.1 (import, repeat, batch, other catalog, document of the same name, same file, invalid uuid, conflicting attribute, uuid collision, missing attribute, failed validator, `-SourceFile` misuse), `meta-validate` on every result; no case in `tools/tests` yet.
 
-### Upstream sync `2026-10-28` — the `meta-*` family
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Source `662e752e`. Versions: `meta-compile` v1.69 → **v1.124**, `meta-edit` v1.24 → **v1.70**, `meta-validate` v1.13 → **v1.42**, `meta-info` v1.4 → **v1.16** (no local deltas — plain refresh).
+Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) `2e75b0f`: `meta-compile` v1.69 → **v1.126**, `meta-edit` v1.24 → **v1.73** (`meta-edit.py` to the same commit), `meta-validate` v1.13 → **v1.45** (both runtimes), `meta-info` v1.4 → **v1.16**, `meta-remove` v1.5 → **v1.15**. `meta-dsl-spec.md` and the `meta-edit` references (`json-dsl.md`, `child-operations.md`, `properties-reference.md`) follow upstream HEAD. External data sources (compile / edit / info / remove / validate) and format 2.21 (8.5) come with HEAD; every script has `[CmdletBinding(PositionalBinding=$false)]`.
 
-Deltas kept, re-applied on the new bodies:
+- **`meta-compile`** — XML the platform refused is no longer written: a `Constant` without `valueType` is `String(10)` (was `<v8:Type>Constant</v8:Type>`, which failed the whole load); `numberLength: 0` drops `Number` from the default `InputByString`; an unknown bare type name is refused with the valid forms instead of reaching the XML verbatim, DBMS spellings (`varchar(n)`, `numeric(p,s)`, `integer`, `timestamp`, `bytea`, …) are translated and `BinaryData` is its own type; `WebService` writes `XDTOPackages` as a list plus `DescriptorFileName`, multilingual service synonyms are language items, `HTTPService` accepts `ReuseSessions=Use`; lower-case kinds, `"Документ.Имя"`, `None` periodicity, `FillChecking=ShowWarning`, dimension `TypeReductionMode` and ISO dates on pwsh 7.5+ are handled; the labels `meta-info` prints are accepted as input; `Detect-FormatVersion` measures characters.
+- **`meta-edit`** — a failed operation is exit 1 with nothing written (was `[WARN]` and exit 0: a missing element, `add-registerRecord` on a borrowed document); `modify-property` normalizes enum values, matches keys case-insensitively, writes empty multilingual properties as XML and handles `CodeLength` / `NumberLength` `0`; removing forms / templates is refused; external-source fields, tables and functions; `meta-edit.py` compares DSL keys case-insensitively.
+- **`meta-validate`** — false ERRORs removed: empty `<Type/>`, IntegrationService / Bot, subscription sources as `v8:TypeSet`, `xr:Item` journal content, `TypeReductionMode` (a 2.18 property, was declared 2.20 — an error on nearly every 8.3.25 / 8.3.26 object). New checks 7b (standard-attribute and `LineNumber` names), 15 (commands), 20 (default / choice form references), 21 (external-source tables), 22 (type-name grammar), 23 (type sets), 24 (format versions), 25 (multilingual strings); tested format range 2.17–2.21.
+- **`meta-info`** — standard-attributes block (owner, code, number, value type), type sets shown as types, clean command names, external data sources.
+- **`meta-remove`** — `Configuration.xml` is scanned for references (configuration-level form slots are listed, cleared only with `-Force`); external-source tables removed as `ExternalDataSource.<Source>.Table.<Table>`; one pass over the configuration instead of two.
 
-- `.dev.env SUPPORT_GUARD` before `.v8-project.json` `editingAllowedCheck` in `meta-compile` and `meta-edit`.
-- `.dev.env NEW_OBJECT_POSITION` before the registry's `newObjectPosition` in `meta-compile`, with the fork's semantics restored: a value that is **set** decides on its own, and an unrecognized value resolves to the documented `end` rather than silently handing the ordering to the fallback file.
-- `meta-edit` auto-validation: the sibling validator is resolved under the fork's directory names (`1c-meta-validate`, `1c-epf-validate` for external objects), a **missing** validator is a refusal raised before the write, and the validator's exit code propagates as the run's verdict (with an explicit stderr line naming the code).
-- `meta-edit` compact empty tags: processing instructions are kept literal (`<?…?>`), as in `form-edit` — upstream protects CDATA and comments only.
-- `meta-validate`: **6a** (an inline `<Form><Properties>` descriptor where a scalar reference belongs), **6c** (descriptor does not parse), **6d** (descriptor name differs from its registration), **16a** (export folder name where a type belongs).
+Local deltas re-applied: `.dev.env` first for `SUPPORT_GUARD` (fail-closed on an unreadable support state) and `NEW_OBJECT_POSITION` in every guard / registration copy (`.v8-project.json` stays the fallback; upstream now uses the same `end` / `byName` design and byte-preserving registration); `meta-compile` exit 3 for an unregistered object and batch runs in the same PowerShell edition; `meta-edit` (both runtimes) refuses `add-form` / `add-template` before any write, resolves its validator under `1c-meta-validate`, refuses before the write when it is missing, keeps `-NoValidate` as the only opt-out and propagates the validator's exit code; upstream's new EPF / ERF auto-validation (`372510bb`) is mapped to `1c-epf-validate` with the same refusal (Python runs the PowerShell script, refuses without a host); `meta-validate` keeps 6a–6d, 2, 6f, 6g, 6h, 8, 12, 16a.
 
-Deltas **dropped** because the ported fixtures showed them to be wrong, not merely redundant. Each was written against v1.12 and fired on dumps the platform accepts:
+Deliberate deviations:
+- **No silent overwrite** — `meta-compile` on an object whose XML exists exits 1 before writing unless `-Force` is passed. Upstream only warns (`123d6e32`); a recompile gives the object a new uuid and breaks the link to the infobase object.
+- **Versions** — the local 1e / 6e (every file carries the `Configuration.xml` version, ERROR) are replaced by upstream check 24, measured on 8.3.27 (`a9086180`, `f421ce3d`): a body out of step with its descriptor is an ERROR, a descriptor out of step with the dump a WARN.
+- **No double reports** — 6f keeps only the form-role rule (resolution is check 20, which also accepts foreign and common forms the old 6f rejected); upstream's cross-kind name block is folded into the local 8, which also covers addressing attributes and accounting flags; check 22 skips types 16a already reported.
 
-- **1e / 6e** (format version must equal `Configuration.xml`) — a 2.18 object inside a 2.20 dump is a routine merge-branch artefact and the platform loads it; upstream's check 24 reports it as the warning it is. Ours turned it into a hard error.
-- **6f** (`Default*Form` must name a declared form) — upstream's check 20 already resolves those references and distinguishes "in the composition, not in this dump" (warning) from "absent altogether" (error); it also accepts a UUID reference, which ours rejected.
-- **6b as an error** — kept, but **downgraded to a warning**: a registered form whose descriptor is missing is the normal shape of a partial dump (`/getconfigfiles` exports a selection, the platform merges it), so a hard error blocked the workflow the ruleset itself prescribes.
-- **2's "name exactly `<Type><Category>.<Name>`"** — external data source tables carry the source name (`ExternalDataSourceTableManager.PG.prices`), so the exact-name rule rejected valid objects.
-- **8 / 12 / 6g / 6h** — superseded: upstream's case-insensitive shared namespace for attributes, tabular sections, dimensions and resources, its per-kind enum tables and its `Description` / `Code` handling cover the same ground with the platform's own rules.
-
-Verification against upstream's own snapshot harness (hybrid skills tree, PowerShell runtime): `meta-compile` **122/123**, `meta-edit` **59/62**, `meta-validate` **77/80** (3 skipped) plus five authored cases for the kept deltas (**5/5**), `meta-info` **29/39** (10 skipped by fixture prerequisites). The failures are accounted for: `meta-compile` / `meta-edit` each have one **LF-preservation** case that cannot pass in a checkout with `core.autocrlf=true` (the LF fixture arrives as CRLF; the fork's own LF handling was verified directly — an LF object keeps LF, 0 CRLF, BOM intact, with the edit applied), and `meta-edit` has two snapshot diffs where the fork deliberately writes `<Name>` and `<Synonym>` on separate lines (the whitespace fix of 2026-09); those snapshots are upstream's, not ours.
+Verified: a configuration of seven objects built by `meta-compile` (catalog with DBMS-typed attributes, `Constant` without `valueType`, enum, document with `numberLength: 0`, periodic information register, HTTP service with `ReuseSessions=Use`, common module) loads with `/UpdateDBCfg` into a fresh file infobase on 8.3.27.2130, and both `meta-validate` runtimes accept every object.
 
 ### Local fix `2026-09-25` — versions, generated types, default forms, name clashes
 
@@ -507,12 +477,24 @@ The PowerShell scripts under `tools/1c-meta-{compile,edit,info,remove,validate}/
 
 ## mxl-manage.md
 
-### Upstream sync `2026-10-28`
+### Local fix `2026-11-16` — `mxl-decompile` stdout is the JSON alone
 
-Source `662e752e`. `mxl-compile` v1.4 → **v1.59**, `mxl-decompile` v1.0 → **v1.32**, `mxl-info` v1.2 → **v1.7**, `mxl-validate` v1.1 → **v1.10**.
+Support ticket 6451045a: without `-OutputPath` the script wrote the JSON with `Write-Output` and then two statistics lines (`Areas: …`, `Fonts: …`) with `Write-Host`. Under `powershell.exe -File` host output goes to the same stdout, so a caller parsing stdout failed (`json.loads`: «Extra data: line 2 column 6»). The statistics lines are now printed only together with `-OutputPath`, after `[OK] Decompiled: …`, as before; without it stdout is the JSON and nothing else. The JSON, the `-OutputPath` file and the `-OutputPath` console output are unchanged. The pinned upstream (`2e75b0f`, v1.32) prints the statistics in both modes.
 
-`mxl-compile` keeps the `.dev.env SUPPORT_GUARD` gate; the other three had no local delta and were replaced outright. The refresh brings `mxl-decompile`'s newer lossless model (cell formats, merged and named areas) that `mxl-compile` reads back.
+Verified under Windows PowerShell 5.1 (`powershell.exe -NoProfile -File`) on a compiled two-column layout: stdout without `-OutputPath` parses as one JSON document, the `-OutputPath` file is byte-identical to the one written before the fix; no case in `tools/tests` yet.
 
+### Upstream sync 2026-11-01 (2e75b0f)
+
+Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) `2e75b0f`, compiler and decompiler together (they share the DSL): `mxl-compile` v1.4 → **v1.61**, `mxl-decompile` v1.0 → **v1.32**, `mxl-info` v1.2 → **v1.7**, `mxl-validate` v1.1 → **v1.11**. The DSL is now described in our own reference [`mxl-dsl-spec.md`](../tools/1c-mxl-compile/mxl-dsl-spec.md) (English, written from upstream's `docs/mxl-dsl-spec.md` and `mxl-compile/reference/*.md`; upstream's test snapshots are not vendored); [mxl-manage.md](mxl-manage.md) was rewritten around it.
+
+- **Fixes:** `parameter`, `detailParameter`, area / drawing names and `faceName` are XML-escaped (9b202555, upstream #121 — `Discount <> 0` gave an unloadable layout); `mxl-decompile` writes to an absolute `-OutputPath` (ccbbecbc — it was glued onto the cwd); `mxl-compile` creates the destination directory (4833c3b7); a cell without `col` is laid out instead of becoming column −1 (f33436ad); texts in every template language, not only `ru` (fc792bfe); fractional font sizes are kept (f6a478c8); a cell with only a drill-down parameter is kept (66bb2856).
+- **New DSL:** column layouts (`columnSets`, area `columnSet`) and named areas bound to them (`namedAreas`, b32bb589); `columnStyles`; row format; every format property in styles; multilingual text and `textLanguages`; input-field cells — `valueType`, `controlType` (the key was `control` upstream for a while, renamed after our pin, so it never existed here), `value`; cell notes; row / column groups; header, footer and `printSettings`; the picture palette and drawings; font references. `mxl-validate` gained checks 13 (input-field cells) and 14 (groups) and reports malformed XML with its location; `mxl-info` too.
+- **Format:** the version is taken from the target `Configuration.xml` / external-object root (2.17 outside a configuration); 2.21 adds `xmlns:pal` (5c3449d6).
+- **Behaviour changes:** an unknown enum value, line style, `printSettings` key, `controlType` or drawing type is now exit 1 instead of being dropped (v1.4 silently ignored e.g. `valign: "bottom"`, which is now honoured); enum values are case-insensitive; the old spellings `align`, `valign`, `wrap`, `border` as a side list and `borderWidth` are synonyms; a format gets a font only from a style's `font` key (`fonts.default` is no longer applied to every format); unstyled cells reference no format. The decompiler emits canonical keys and positional cells.
+- **Round trip:** upstream rebuilds 7 of 10 platform-made layouts of its control set byte-for-byte; the other three differ only in stale column widths left in cell formats. With our scripts, 13 of upstream's 14 Configurator-saved round-trip fixtures rebuild byte-for-byte (the 14th, a vendor print form, loses only palette leftovers: stale widths / heights in cell formats, a zero-height row format). Merges not bound to a cell, chart contents and the print area are still lost.
+- **Local deltas kept:** `.dev.env` `SUPPORT_GUARD` first and fail-closed on an unreadable `ParentConfigurations.bin` in `mxl-compile` (the one merge conflict — kept beside upstream's `ProviderPath` / `GetFullPath` lookup).
+- **Local deviations, new:** `mxl-compile` runs the support guard *before* creating the destination directory (upstream created it first, so a refusal left an empty directory); writes `printSettings` after the named items, where 8.3.27 and 8.5.1 put it (upstream wrote it before `<merge>`; its only platform fixture had neither merges nor named items); refuses a control kind such as `"checkbox"` in the base64 `control` key (it went into the XML as garbage settings). `mxl-decompile`: a layout with exactly one row group (and no column groups) threw "A hash table can only be added to another hash table" — the PowerShell port unrolled the single-group array; fixed at the call site.
+- **Verified** on throwaway file infobases: a compiled layout with header / footer, print settings, input-field cells, a note, a row group, a bound column layout, a picture and escaped `<` / `&` builds into an EPF and dumps back on 8.3.27 and 8.5.1; the platform's dump decompiles and recompiles byte-for-byte (8.5.1 into a 2.21 tree, with `xmlns:pal`). Pinned by `tools/tests/metadata-tools-regression.ps1` (eight MXL cases).
 
 ### Upstream sync `2026-07-30`
 
@@ -528,23 +510,23 @@ The compile/decompile/info scripts (`mxl-compile`, `mxl-decompile`, `mxl-info`) 
 
 ## role-manage.md
 
-### Upstream sync `2026-10-28` — the rest of the family
+### Upstream sync 2026-11-01 (2e75b0f)
 
-Source `662e752e`. `role-compile` v1.8 → **v1.47**, `role-info` v1.2 → **v1.7**, `role-validate` v1.1 → **v1.9**, plus the newly vendored `role-edit` described above.
+Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `role-compile` v1.8 → **v1.49**, `role-info` v1.2 → **v1.7**, `role-validate` v1.1 → **v1.10**; new tool **`role-edit` v1.11** (`tools/1c-role-edit/scripts/`).
 
-Deltas kept: `.dev.env SUPPORT_GUARD` in `role-compile`; in `role-edit` the validator resolved from `1c-role-validate` with its exit code propagated.
+- **`role-edit`** edits an existing role in place (rights with cascade, deny, RLS rows by field list, templates, flags, synonym / comment, `@file` values, `-DefinitionFile` batches); the UUID and the other entries are kept. The `SKILL.md → Hard rule` exception for hand-editing `Rights.xml` is withdrawn; `metadata-xml-workarounds.md` follows.
+- **Services:** `HTTPService.X: Use` (and `WebService` / `IntegrationService`) is expanded to one entry per URL-template method / operation / channel from the service metadata; a right on the service root is an error in `role-validate` (the routes answered 403). The old docs taught the root form.
+- **Warnings became errors:** a type without rights (`Enum`, `CommonModule`, …), an unknown type or right, an impossible nested kind — `role-compile` refuses before writing (all reasons at once, exit 1), `role-validate` exits 1. A rights block on an enum made the configuration hang on load.
+- **Platform shape:** rights closure (`Edit` → `Read`, `Update`, `View`, …), the platform order of `<right>` and `<object>` nodes, values equal to the role default not stored from format 2.19.
+- `role-compile`: RLS condition and template body from `@file`; format version from `Configuration.xml` measured in characters (fae22435).
+- `role-validate`: `PositionalBinding=$false` — a second positional argument no longer binds to `-OutFile` and overwrites e.g. `Roles/X.xml` with the report (83d63fac); the `Rights.xml` version must equal `Roles/<Name>.xml` (error), a role version different from the dump is a warning; `-MaxErrors` really stops; messages in English.
+- Docs: the compile section named `-RolePath` — the parameter is `-JsonPath`. Rights tables replaced with upstream's; `dsl-reference.md` re-vendored from `2e75b0f`.
 
+Local deltas re-applied: support guard from `.dev.env` `SUPPORT_GUARD`, fail-closed on an unreadable support state, stderr notice on other guard errors (`role-compile`, `role-edit`); `role-compile` registration position from `.dev.env` `NEW_OBJECT_POSITION` (as `cf-edit`). Deviations in `role-edit`: the sibling validator is `..\..\1c-role-validate\scripts\role-validate.ps1`, its absence is refused before the edit (upstream skipped it silently) and its exit code is the run's result (upstream ignored it); the compact-tag pass keeps processing instructions verbatim, as in `skd-edit` / `cf-edit`. The rights tables of `role-edit` and `role-compile` are identical. No Python port is shipped.
 
-### New tool `2026-10-28` — `role-edit` v1.9 vendored
+Platform check (8.3.27.2130, throwaway file infobase): a role made by `role-compile` and changed by `role-edit` (`add-rights` on two reports, `deny-rights` on an attribute) keeps its UUID, passes `role-validate`, loads with `/UpdateDBCfg` and dumps back byte-identical; `role-compile` refuses `Enum.X: Read` with exit 1.
 
-`role-edit` is new to the fork: our `role-compile` only ever creates a role with a new UUID, so changing an existing role was the documented exception "edit `Ext/Rights.xml` by hand against the templates". The upstream tool does that in place — rights, RLS, templates, role flags, synonym and comment — keeping the UUID and every entry the operation does not name.
-
-Local deltas, on top of the upstream script:
-
-- `.dev.env SUPPORT_GUARD` before `.v8-project.json` `editingAllowedCheck`, the same block as the other mutators (a role on vendor support is refused).
-- The auto-validation call resolves the fork's sibling directory (`../../1c-role-validate`) and its **exit code propagates** — a role that was written but fails `role-validate` exits non-zero instead of silently reporting success.
-
-Verification: upstream's 28 `role-edit` cases pass against the vendored script (hybrid skills tree, PowerShell runtime).
+Local gate (same sync): `role-compile` refuses an existing `Roles/<Name>.xml` unless `-Force` (exit 1, nothing written) — a recompile gives the role a new uuid, as `meta-compile` does for objects; existing roles are changed with `role-edit`. Upstream overwrites. Regression case: refusal without `-Force`, replacement with it.
 
 ### Local fix `2026-10-14` — `role-validate` parameters, rights-only edits
 
@@ -564,16 +546,26 @@ The PowerShell scripts under `tools/1c-role-{compile,info,validate}/scripts/` we
 
 ## skd-manage.md
 
-### Upstream sync `2026-10-28` — the `skd-*` family
+### Upstream sync 2026-11-01 (2e75b0f)
 
-Source `662e752e`. `skd-compile` v1.109 → **v1.139**, `skd-decompile` v0.91 → **v0.106**, `skd-edit` v1.30 → **v1.50**, `skd-info` v1.8 → **v1.14**, `skd-validate` v1.2 → **v1.8** (`skd-info` / `skd-validate` / `skd-decompile` had no local delta — plain refresh).
+Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `skd-compile` v1.109 → **v1.141**, `skd-edit` v1.30 → **v1.50**, `skd-decompile` v0.91 → **v0.108**, `skd-info` v1.8 → **v1.14**, `skd-validate` v1.2 → **v1.9**; new tool `v8-xsd-fetch` **v1.2** (`tools/1c-v8-xsd-fetch/`, PowerShell only, with `templates/README.md`). Full DSL spec re-vendored.
 
-Deltas kept: `.dev.env SUPPORT_GUARD` before `.v8-project.json` in `skd-compile` / `skd-edit`; processing instructions kept literal in the compact-tag writer of `skd-edit` (upstream protects CDATA and comments only).
+- **XSD element order** (#101): calculated field `valueType` last, `useRestriction` flags in field/condition/group/order, `dataParameters` right after `filter`, grouping `filter` before `order` / `selection`, booleans as `true` / `false`. Before, the platform refused such a schema through XDTO ("Нарушен порядок следования значений свойств").
+- **`skd-edit` inserts at the XSD position** (#119): `modify-filter` / `modify-dataParameter` no longer append `use` / `value` after `userSettingID` (an XDTO load error); `modify-dataParameter` removes every old list value, not only the first.
+- **Value lists in `dataParameters`**: one `<dcscor:value>` per item instead of one glued `"A B C"` string; numbers take the schema parameter's type instead of `xs:string`; comma-separated shorthand lists in `skd-compile` and `skd-edit`.
+- **Default variant** (#115): without `settingsVariants` the variant "Основной" now selects the declared fields with detail records — it used to produce an empty report; `[INFO]` / `[WARN]` hints name what was built or what is missing. `skd-decompile` keeps that variant.
+- **`useRestriction` object form** of a data-set field is emitted (was ignored silently). `skd-info -Mode variant` prints `DataParams` again (`dcscor:item`). Decompile → compile keeps `autoFillFields` / `useQueryGroupIfPossible` (new DSL key) and the data-set `source`.
+- **`skd-validate` checks against the platform XSD** when schemas are present, with fix hints (`must come before <X>`, `duplicate`, `not allowed in <P>`); without schemas the summary says `XSD not checked: <reason>` instead of a bare OK. Boolean values are checked without schemas; a lower-case root is a warning.
+- Every script carries `[CmdletBinding(PositionalBinding=$false)]`.
 
-What the refresh buys: a lossless `decompile → compile` round-trip for filter and parameter **values** (references, empty values, calculated fields, `availableValues`, parameter data types and their short form), query-dataset flags and source binding, and `ProviderPath` for network paths.
+Local deltas re-applied: the `.dev.env` `SUPPORT_GUARD` support guard (fail-closed on an unreadable support state) in `skd-compile` / `skd-edit` — the only conflict was `Get-EditMode`, resolved as our `.dev.env` block plus upstream's `ProviderPath` lookup; `skd-edit`'s compact-tag pass keeps skipping processing instructions as well as CDATA and comments (upstream's 4c64b97c guards only the latter two).
 
-Verification (upstream snapshot harness against the ported files): `skd-compile` **54/54**, `skd-decompile` **19/19**, `skd-edit` **59/59**, `skd-info` **8/8** (3 skipped by fixture prerequisites), `skd-validate` **19/19** (7 skipped).
+New local deltas:
+- **`V8_XSD_PATH`** in `.dev.env` (relative to the `.dev.env` directory) is the schema directory of both `skd-validate` and `v8-xsd-fetch`; without it — `.v8-project.json` `xsdPath`, then `.v8-xsd` next to `.dev.env`. The "XSD not checked" note names the directory it looked in.
+- **`v8-xsd-fetch` resolves the ref to a commit SHA** (`commits/<ref>`, media type `.sha`) before listing `git/trees/<commit>`; raw URLs and `source.json` carry that commit. Upstream took `sha` of `git/trees/<ref>`, documented as the tree SHA: today the API echoes the commit SHA there, so it works, but `raw.githubusercontent.com` answers 404 for a real tree SHA (checked 2026-11-01). A truncated tree listing is refused. `User-Agent` is set before every request — .NET Framework `WebClient` drops it after a request, and the API answers 403 without it.
+- **`v8-xsd-fetch` writes `.gitignore` (`*`)** into the schema directory: the schemas are 1C-Soft property and are never committed.
 
+Platform check (8.3.27.2130, throwaway file infobase): two reports built by `skd-compile` (calculated field with type and format, value lists of numbers and enum references in `dataParameters`, default variant) and edited by `skd-edit` (`modify-filter`, `modify-dataParameter`) pass `skd-validate` against the fetched 2.20 XSD, load with `/LoadConfigFromFiles` + `/UpdateDBCfg`, and dump back identical except a generated `dNp1` prefix.
 
 ### Upstream sync `2026-07-30`
 
@@ -630,12 +622,15 @@ The PowerShell scripts under `tools/1c-skd-{compile,edit,info,validate}/scripts/
 
 ## subsystem-manage.md
 
-### Upstream sync `2026-10-28`
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Source `662e752e`. `subsystem-compile` v1.9 → **v1.35**, `subsystem-edit` v1.7 → **v1.27**, `subsystem-info` v1.2 → **v1.7**, `subsystem-validate` v1.2 → **v1.7**.
+`subsystem-compile` v1.9 → **v1.37**, `subsystem-edit` v1.7 → **v1.29**, `subsystem-info` v1.2 → **v1.7**, `subsystem-validate` v1.2 → **v1.8**.
 
-Deltas kept: `.dev.env SUPPORT_GUARD`; the sibling validator in `$PSScriptRoot`; processing instructions kept literal. Upstream's anchor-based `ChildObjects` insert — it patches the parent text instead of re-serialising the document, which is what keeps the parent's formatting intact — replaces the fork's `XmlWriter` save.
+- `subsystem-validate` **check 14**: stamped bodies (`Ext/CommandInterface.xml`, `Ext/Help.xml`) in the descriptor's version — ERROR; descriptor differs from the dump — WARN.
+- `subsystem-compile` registers in the parent by raw-text insertion (the parent stays byte-identical except one line) and puts a new kind group at its canonical place; child stubs and the descriptor follow the configuration's format version (2.21 `xmlns:pal`); `Detect-FormatVersion` measures characters.
+- Both: quotes in text are no longer escaped, missing kinds restored, operation values case-insensitive.
 
+Local deltas re-applied: `.dev.env` `SUPPORT_GUARD` first with fail-closed parsing; sibling `subsystem-validate`, its exit is the exit code. Dropped as superseded: our DOM compact-XML save in `subsystem-compile` (upstream's raw-text insertion is stricter); `subsystem-edit` keeps the `<?…?>` branch of the compact-tag pass.
 
 ### Upstream sync `2026-07-30`
 
@@ -653,12 +648,31 @@ The PowerShell scripts under `tools/1c-subsystem-manage/scripts/` were refreshed
 - Subsystem `objects` accepts `content` as a synonym (and vice versa).
 - Validators got the universal improvements described in `role-manage.md` → "Recent Additions" (one-liner output by default, `-Detailed`, folder path auto-resolution).
 
+## support-manage.md
+
+### Upstream sync `2026-11-01` (`2e75b0f`)
+
+`support-edit` v1.0 → **v1.3** (positional binding off; no behaviour change).
+
+- `xdto-compile` / `xdto-edit` replaced their trimmed guard ("`ParentConfigurations.bin` exists → deny") with the shared per-object one: a configuration with modification on and nothing on support (header `{6,0,0,…}`, e.g. ERP) is allowed, as `meta-compile` allows it; a read-only one is still refused, now with the `support-edit` steps.
+- The shared guard resolves `configSrc` from the `.v8-project.json` directory (fallback path only).
+
+Local: `.dev.env` `SUPPORT_GUARD` wins in every copy, fail-closed on an unreadable bin. Regression case: `xdto-compile` on a K=0 configuration and on a locked one.
+
+Local fix (same sync): the fail-closed branch also caught a `ParentConfigurations.bin` of 32 bytes or less — the empty container a configuration keeps once vendor support was removed completely (upstream spec: ~16 bytes; the `*-info` tools already reported it as "removed") — and refused every edit of such a configuration. All 19 PowerShell copies of `Assert-EditAllowed`, the three Python copies and the Claude Code hook now treat it as "nothing on support"; an unparseable larger file stays fail-closed. Pinned by `metadata-tools-regression.ps1` (meta-edit on both shapes) and the hook parity test.
+
 ## template-manage.md
 
-### Upstream sync `2026-10-28` — `template-remove`
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Source `662e752e`. `template-remove` v1.3 → **v1.9** (`add-template` is described above). Upstream absorbed the fork's save pipeline here too; the processing-instruction branch had to be re-added.
+`template-add` v1.10 → **v1.30**, `template-remove` v1.3 → **v1.9**.
 
+- **HTML templates use the platform layout**: descriptor `Ext/Template.xml` (`<Help>` with `<Page>` entries) plus `Ext/Template/<lang>.html`. The old single `Ext/Template.html` is silently ignored by the platform (the template loads empty). Verified live on 8.3.27.2130: two pages survive `/LoadConfigFromFiles` + `/DumpConfigToFiles` with their text.
+- **`-Lang`**: a repeated call adds a page in another language (the metadata and existing pages are never rewritten); a legacy `Ext/Template.html` is migrated to `Template/ru.html` with a warning, an ambiguous tree is refused; the code is validated before any write.
+- Format version from the owner (EPF / ERF root first), 2.21 `xmlns:pal`; `<Template>` is inserted at the owner kind's canonical place; `Detect-FormatVersion` measures characters; an empty SpreadsheetDocument is a self-closing root.
+- `template-remove`: an emptied `ChildObjects` becomes `<ChildObjects/>`; compact tags and EOL are kept.
+
+Local deltas re-applied: `-ObjectName` as an absolute / relative object XML path (Local fix `2026-09-13`); `.dev.env` `SUPPORT_GUARD` first with fail-closed parsing; `template-remove` preflight parse, atomic root-XML write via a temp file, `-DryRun` / `-Force` (the missing-`-Force` refusal now really exits `2` — `Write-Error` under `Stop` used to end it with `1`); `<?…?>` skipped by the compact-tag pass; `[CmdletBinding(PositionalBinding=$false)]` added to both (upstream left them without it). Regression cases: HTML layout + second language, refused `-Lang`, removal gates.
 
 ### Local fix `2026-09-13` — object XML paths
 
@@ -670,12 +684,18 @@ Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikola
 
 ## web-manage.md
 
-### Upstream sync `2026-10-28`
+### Upstream sync 2026-11-01 (2e75b0f)
 
-Source `662e752e`. `web-publish` v1.4 → **v1.16**, `web-info` v1.0 → **v1.7**, `web-stop` v1.0 → **v1.4**, `web-unpublish` v1.0 → **v1.4**.
+Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills): `web-publish` v1.4 → **v1.17**, `web-info` v1.0 → **v1.7**, `web-stop` v1.0 → **v1.4**, `web-unpublish` v1.0 → **v1.4**. The Python ports stay ours; only `web_common.py` changed.
 
-Deltas kept: the `.dev.env` platform chain in `web-publish` (install-directory `PLATFORM_PATH`, `bin\` resolution for `wsap24.dll`); the `-DryRun` / `-Force` gate in `web-unpublish`. Upstream's newer `default.vrd` defaults (`publishExtensionsByDefault`, `httpServices`) are in.
-
+- **Extension SOAP services are published** (1eeea204): `publishExtensionsByDefault="true"` is now on `<ws>` too, in both runtimes; without it an extension's web service answered 500. The `<httpServices>` flag of the 2026-10-01 local fix stays.
+- **Republish right after `web-stop` works** (9ae792a9): the port check counts listening sockets only, so `TIME_WAIT` leftovers (owner PID 0) no longer read as "port busy by Idle".
+- **The bind address survives a republish** (933414f2, 68a2a11a): every `Listen` address of the managed block is kept, only the port changes; URLs follow the first address; stock `Listen` lines are commented whole. A PowerShell publication over a Python-made config no longer opens Apache on all interfaces.
+- **`web-info`** (fbf4d4f9, 88535a75, b8cbb011, 0d4933f1, 933414f2): OData is detected by `<standardOdata enable>`, `+ext` marks extension services, `Listen 127.0.0.1:port` parses as host + port, a TCP probe says whether the port answers, the log section shows only `error` and above (without `AH02538`) and names the log file.
+- **`-InfoBasePath` normalization** (8d9e6c46): quotes, whitespace and trailing separators are forgiven, `C:x` and inner quotes refused, a relative path is anchored at the project root; `ProviderPath` for UNC working directories (d7a66b63); `PositionalBinding=$false` in all four scripts (0a0322fa).
+- Local deltas re-applied: `.dev.env` `PLATFORM_PATH` first, install dir or `bin\` accepted (the per-database `v8path` of `.v8-project.json` comes after it); `<httpServices publishExtensionsByDefault>`; the `web-unpublish` `-DryRun` / `-Force` gate; the working-directory default `-ApachePath`, now also in `web-info` and `web-stop` (upstream's four-levels-up default pointed inside the skills directory in our layout).
+- New local fixes: `web-publish` XML-escapes `Usr` / `Pwd` / `File` / `Srvr` / `Ref` in `default.vrd` (a password with `&` produced an invalid descriptor) and refuses a quote or line break, as the Python port; the relative-path anchor is the `.dev.env` directory, not `.v8-project.json`; the `PidFile` / `ErrorLog` lines of the managed block survive a rewrite; `-AppName` is validated with the Python rule in `web-publish` and `web-unpublish` (no path segment reaches the recursive delete; `-All` and `-AppName` are exclusive); `web-info` masks `Pwd` and reads the effective `ErrorLog` (the managed block's, else the last directive); `web-stop` hints name our scripts. Python: a relative `-InfoBasePath` is anchored like `.dev.env` values, `C:x` refused.
+- Tests: `tools/tests/web-ops-regression.ps1` (new, PowerShell scripts end to end with a fake `httpd.exe`); `web-python-regression.py` pins the `<ws>` flag and the path anchor. Verified live on 8.3.27 (x86) with a Win32 Apache 2.4.69: Python publish on loopback → PowerShell republish over it (bind address, `PidFile`, `ErrorLog` kept; the 1C module answered with the escaped VRD) → `web-info` → `web-stop` → immediate republish → `web-unpublish -DryRun` / `-Force`.
 
 ### Local fix `2026-10-01` — extension HTTP services are published
 
@@ -688,16 +708,14 @@ Scripts refreshed from [Nikolay-Shirokov/cc-1c-skills](https://github.com/Nikola
 - **OData is enabled correctly in `default.vrd`** — via the `<standardOdata enable="true"/>` child element instead of the old `enableStandardOdata` attribute, which the platform ignored. Publications that need the standard OData interface actually get it now.
 - Platform path resolution follows the `db-*` chain (explicit → `.dev.env` → `.v8-project.json` → auto-detect), locally patched to also accept the version install directory shape used by `.dev.env` `PLATFORM_PATH` (resolves `bin\` for `wsap24.dll`).
 
-## support-manage.md
-
-### Upstream sync `2026-10-28`
-
-Source `662e752e`. `support-edit` v1.0 → **v1.3** — the toggle itself is unchanged; the refresh brings the shared support-state specification and the `Ext/ParentConfigurations.bin` parsing that the other tools' guard rails now use.
-
 ## xdto-manage.md
 
-### Upstream sync `2026-10-28`
+### Upstream sync `2026-11-01` (`2e75b0f`)
 
-Source `662e752e`. `xdto-compile` v1.1 → **v1.18**, `xdto-decompile` v1.0 → **v1.3**, `xdto-edit` v1.0 → **v1.9**, `xdto-info` v1.0 → **v1.3**, `xdto-validate` v1.1 → **v1.6**.
+`xdto-compile` v1.1 → **v1.18**, `xdto-edit` v1.0 → **v1.9**, `xdto-decompile` v1.0 → **v1.3**, `xdto-info` v1.0 → **v1.3**, `xdto-validate` v1.1 → **v1.7**.
 
-Deltas kept: the `.dev.env SUPPORT_GUARD` gate in `xdto-compile` / `xdto-edit`; the sibling `xdto-validate` / `xdto-decompile` dispatch from `$PSScriptRoot` (upstream's `..\..\xdto-<name>\scripts` path does not exist in this layout). Upstream's `Assert-EditAllowed` — resolve the element uuid, walk up to the configuration root, treat an autonomous external object as always editable — replaces the fork's simpler walk.
+- `xdto-compile` stamps the package with the `Configuration.xml` format version (was hard-coded 2.17), 2.21 `xmlns:pal`; registration in `Configuration.xml` follows the kind order and `NEW_OBJECT_POSITION`.
+- `xdto-compile` / `xdto-edit` use the shared support guard (see `support-manage.md`).
+- `xdto-validate`: English messages; a `-MaxErrors` stop is reported.
+
+Local deltas re-applied: `.dev.env` `SUPPORT_GUARD` and `NEW_OBJECT_POSITION` first; `xdto-edit` takes `xdto-decompile` / `xdto-compile` / `xdto-validate` from its own `scripts` dir. Deviation: a missing `xdto-validate` or its non-zero exit is now the exit code of `xdto-edit` (upstream prints `[SKIP]` / ignores the result and exits 0), like the other editing tools.

@@ -1,5 +1,10 @@
-﻿# web-publish v1.16 — Publish 1C infobase via Apache (+_version_dir/_version_key: общий эталон db-семейства)
+﻿# web-publish v1.17 — Publish 1C infobase via Apache
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: .dev.env PLATFORM_PATH first (install dir or bin\ accepted); relative -InfoBasePath
+#        anchored at the .dev.env project root; publishExtensionsByDefault on <httpServices>
+#        (2026-10-01); Usr/Pwd/File/Srvr/Ref XML-escaped in default.vrd (a quote or line break
+#        refused); -AppName validated; PidFile/ErrorLog of the global block kept on rewrite;
+#        consolidated-layout default -ApachePath (working directory).
 <#
 .SYNOPSIS
     Публикация информационной базы 1С через Apache HTTP Server
@@ -114,9 +119,10 @@ function ConvertTo-CleanPath {
 $InfoBasePath = ConvertTo-CleanPath $InfoBasePath '-InfoBasePath'
 
 function Resolve-InfoBasePath {
-    # Относительный путь к базе — от корня проекта (каталог .v8-project.json, вверх от рабочего
-    # каталога), как configSrc; без файла проекта — от рабочего каталога. Платформе уходит только
-    # абсолютный: ibcmd считает относительный --db-path от каталога --data, а он у навыков временный.
+    # Относительный путь к базе — от корня проекта, вверх от рабочего каталога; без файла
+    # проекта — от рабочего каталога. Платформе уходит только абсолютный путь.
+    # 1c-rules: корень проекта — каталог .dev.env (единственный источник параметров проекта);
+    # каталог .v8-project.json остаётся запасным вариантом апстрима.
     # Абсолютный — только с диском и разделителем или UNC: «\x» .NET считает корневым, а платформа
     # разрешила бы его от своего каталога; «\x» берёт диск базового каталога. «C:x» отклоняет ещё
     # ConvertTo-CleanPath. Хвостовые разделители срезаются, но корень («C:\») остаётся корнем.
@@ -124,14 +130,21 @@ function Resolve-InfoBasePath {
     if (-not $Path) { return $Path }
     if ($Path -notmatch '^([A-Za-z]:[\\/]|[\\/]{2})') {
         $cwd = (Get-Location).ProviderPath
-        $base = $cwd
+        $base = $null
+        $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+        if (Test-Path $__devEnvHelper) {
+            . $__devEnvHelper
+            $__devEnvFile = Find-1CDevEnvFile $cwd
+            if ($__devEnvFile) { $base = [System.IO.Path]::GetDirectoryName($__devEnvFile) }
+        }
         $d = $cwd
-        for ($i = 0; $i -lt 20 -and $d; $i++) {
+        for ($i = 0; $i -lt 20 -and $d -and -not $base; $i++) {
             if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
             $parent = [System.IO.Path]::GetDirectoryName($d)
             if ($parent -eq $d) { break }
             $d = $parent
         }
+        if (-not $base) { $base = $cwd }
         $joined = if ($Path -match '^[\\/]') { [System.IO.Path]::GetPathRoot($base).TrimEnd('\', '/') + $Path }
             else { [System.IO.Path]::Combine($base, $Path) }
         $Path = [System.IO.Path]::GetFullPath($joined)
@@ -252,9 +265,34 @@ if (-not $InfoBasePath -and (-not $InfoBaseServer -or -not $InfoBaseRef)) {
     exit 1
 }
 
+function ConvertTo-VrdIbPart {
+    # 1c-rules: one Key="value" pair of the vrd ib attribute, XML-escaped. A password with '&'
+    # or '<' used to produce an invalid default.vrd. A quote or a line break cannot be carried
+    # inside the quoted 1C value — refused, as in the Python port. Tab is a character reference:
+    # XML attribute normalization would turn a literal tab into a space.
+    param([string]$Key, [string]$Value)
+    if ($Value -match "[`"`r`n`0]") {
+        Write-Host "Error: недопустимый символ (кавычка или перевод строки) в параметре соединения $Key" -ForegroundColor Red
+        exit 1
+    }
+    $esc = $Value.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;').Replace("`t", '&#9;')
+    return "$Key=&quot;$esc&quot;"
+}
+
+$ibParts = @()
+if ($InfoBaseServer -and $InfoBaseRef) {
+    $ibParts += ConvertTo-VrdIbPart 'Srvr' $InfoBaseServer
+    $ibParts += ConvertTo-VrdIbPart 'Ref' $InfoBaseRef
+} else {
+    $ibParts += ConvertTo-VrdIbPart 'File' $InfoBasePath
+}
+if ($UserName) { $ibParts += ConvertTo-VrdIbPart 'Usr' $UserName }
+if ($Password) { $ibParts += ConvertTo-VrdIbPart 'Pwd' $Password }
+$ibString = ($ibParts -join ";") + ";"
+
 # --- Resolve ApachePath ---
 if (-not $ApachePath) {
-    $projectRoot = (Get-Location).Path  # consolidated skill layout: project root = current working directory
+    $projectRoot = (Get-Location).ProviderPath  # consolidated skill layout: project root = current working directory
     $ApachePath = Join-Path $projectRoot "tools\apache24"
 }
 # Ensure absolute path (agent may pass relative like "tools/apache24")
@@ -365,6 +403,12 @@ if (-not $AppName) {
     Write-Host "Error: не удалось определить имя публикации. Укажите -AppName" -ForegroundColor Red
     exit 1
 }
+# 1c-rules: the name becomes a directory under publish\, an Apache Alias and the vrd base —
+# same rule as the Python port: letters, digits, '_' and '-', no device names.
+if ($AppName -notmatch '^[\w-]{1,64}$' -or $AppName -match '^(con|prn|aux|nul|com[1-9]|lpt[1-9])$') {
+    Write-Host "Error: недопустимое имя публикации '$AppName' (буквы, цифры, '_' и '-', до 64 символов)" -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "Публикация: $AppName" -ForegroundColor Cyan
 
@@ -374,19 +418,8 @@ if (-not (Test-Path $publishDir)) {
     New-Item -ItemType Directory -Path $publishDir -Force | Out-Null
 }
 
-# --- Generate default.vrd ---
+# --- Generate default.vrd ($ibString is built and checked before any file is touched) ---
 $vrdPath = Join-Path $publishDir "default.vrd"
-
-$ibParts = @()
-if ($InfoBaseServer -and $InfoBaseRef) {
-    $ibParts += "Srvr=&quot;$InfoBaseServer&quot;"
-    $ibParts += "Ref=&quot;$InfoBaseRef&quot;"
-} else {
-    $ibParts += "File=&quot;$InfoBasePath&quot;"
-}
-if ($UserName) { $ibParts += "Usr=&quot;$UserName&quot;" }
-if ($Password) { $ibParts += "Pwd=&quot;$Password&quot;" }
-$ibString = ($ibParts -join ";") + ";"
 
 $vrdContent = @"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -424,11 +457,18 @@ $globalMarkerEnd = "# --- End: global ---"
 # Адреса привязки, вписанные в наш блок руками (Listen 127.0.0.1:port + Listen [::1]:port),
 # при перезаписи сохраняем все — меняется только порт
 $listenHosts = @()
+# 1c-rules: PidFile / ErrorLog lines of the block survive the rewrite too — the Python port
+# writes them there, and dropping them moved the PID file and error log of a running layout.
+$keptLines = @()
 $globalPattern = [regex]::Escape($globalMarkerStart) + '([\s\S]*?)' + [regex]::Escape($globalMarkerEnd)
 if ($confContent -match $globalPattern) {
-    foreach ($lm in [regex]::Matches($Matches[1], '(?mi)^[ \t]*Listen[ \t]+(?:(\[[^\]]+\]|[^\s:\[\]]+):)?(\d+)\b')) {
+    $globalBody = $Matches[1]
+    foreach ($lm in [regex]::Matches($globalBody, '(?mi)^[ \t]*Listen[ \t]+(?:(\[[^\]]+\]|[^\s:\[\]]+):)?(\d+)\b')) {
         $h = $lm.Groups[1].Value
         if ($listenHosts -cnotcontains $h) { $listenHosts += $h }
+    }
+    foreach ($km in [regex]::Matches($globalBody, '(?mi)^[ \t]*(?:PidFile|ErrorLog)[ \t]+[^\r\n]+')) {
+        $keptLines += $km.Value.Trim()
     }
 }
 if ($listenHosts.Count -eq 0) { $listenHosts = @("") }
@@ -436,17 +476,13 @@ $listenLines = ($listenHosts | ForEach-Object { if ($_) { "Listen ${_}:$Port" } 
 # URL — по первому адресу; «все интерфейсы» → localhost
 $firstHost = $listenHosts[0]
 $urlHost = if ($firstHost -and @('0.0.0.0', '*', '[::]') -notcontains $firstHost) { $firstHost } else { "localhost" }
-$globalBlock = @"
-$globalMarkerStart
-$listenLines
-LoadModule _1cws_module "$wsapDllFwd"
-$globalMarkerEnd
-"@
+$globalLines = @($globalMarkerStart, $listenLines, "LoadModule _1cws_module `"$wsapDllFwd`"") + $keptLines + @($globalMarkerEnd)
+$globalBlock = $globalLines -join "`n"
 
 if ($confContent -match [regex]::Escape($globalMarkerStart)) {
     # Replace existing global block
     $pattern = [regex]::Escape($globalMarkerStart) + '[\s\S]*?' + [regex]::Escape($globalMarkerEnd)
-    $confContent = [regex]::Replace($confContent, $pattern, $globalBlock)
+    $confContent = [regex]::Replace($confContent, $pattern, { param($m) $globalBlock })  # evaluator: no $-substitution in paths
 } else {
     # Comment out default Listen to avoid port conflict
     $confContent = $confContent -replace '(?m)^([ \t]*Listen\b[^\r\n]*)', '#$1  # commented by web-publish'
@@ -472,7 +508,7 @@ $pubMarkerEnd
 if ($confContent -match [regex]::Escape($pubMarkerStart)) {
     # Replace existing publication block
     $pattern = [regex]::Escape($pubMarkerStart) + '[\s\S]*?' + [regex]::Escape($pubMarkerEnd)
-    $confContent = [regex]::Replace($confContent, $pattern, $pubBlock)
+    $confContent = [regex]::Replace($confContent, $pattern, { param($m) $pubBlock })
 } else {
     # Append publication block
     $confContent = $confContent.TrimEnd() + "`n`n" + $pubBlock + "`n"
@@ -490,7 +526,8 @@ function Get-OurHttpd {
 }
 
 # --- Check port availability ---
-$portCheck = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue | Select-Object -First 1
+# Only a listening socket holds the port: TIME_WAIT leftovers of a just-stopped Apache (owner PID 0) do not
+$portCheck = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($portCheck) {
     $ourProc = Get-OurHttpd
     if ($ourProc) {

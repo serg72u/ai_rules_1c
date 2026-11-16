@@ -1,5 +1,17 @@
-﻿# meta-edit v1.70 — Edit existing 1C metadata object XML
+﻿# meta-edit v1.73 — Edit existing 1C metadata object XML
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: add-form / add-template are refused before any mutation, for every key
+# spelling and across the whole definition, and point at form-add / add-template
+# (Section 9.7); the auto-validator is resolved under the downstream dirs
+# 1c-meta-validate / 1c-epf-validate (EPF/ERF), a missing validator is a refusal
+# raised before the write, -NoValidate is the one opt-out and the validator's
+# exit code is ours; the support guard reads .dev.env SUPPORT_GUARD first and
+# fails closed on an unreadable Ext/ParentConfigurations.bin.
+# Local (2026-11-08): import-attribute (-SourceFile + -Value) copies a native
+# <Attribute> with its own uuid from the same object of a previous dump
+# (Section 9.6); every refusal comes before the write, a repeated import of an
+# identical attribute writes nothing, and a failed auto-validation restores the
+# target's original bytes. Not ported to meta-edit.py.
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[string]$DefinitionFile,
@@ -23,10 +35,14 @@ param(
 		"modify-enumValue", "modify-column",
 		"modify-property",
 		"set-owners", "set-registerRecords", "set-basedOn", "set-inputByString",
-		"set-dataLockFields", "set-registeredDocuments"
+		"set-dataLockFields", "set-registeredDocuments",
+		"import-attribute"
 	)]
 	[string]$Operation,
 	[string]$Value,
+
+	# Local: import-attribute only — XML of the same object from the previous dump
+	[string]$SourceFile,
 
 	[switch]$NoValidate
 )
@@ -38,14 +54,23 @@ $ErrorActionPreference = "Stop"
 # идёт чинить скрипт, а не свой вызов. $source — файл или параметр. $expected заполняем только
 # для полиморфного входа: у файла подсказка была бы наполнителем. -Inline печатает ещё и то,
 # что доехало: у файла такого вопроса нет — путь назван, позицию дал парсер, файл на диске.
-# Возврат через -NoEnumerate: без него одноэлементный
-# JSON-массив разворачивался бы в скаляр вторым анруллингом.
+# Возврат через запятую: без неё одноэлементный JSON-массив разворачивался бы в скаляр
+# вторым анруллингом. Не Write-Output -NoEnumerate: pwsh 7.6 заворачивает им в List
+# и одиночный объект (issue #136).
 function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected, [switch]$Inline) {
 	try {
 		# PS 5.1 на пустой строке отдаёт $null, а не ошибку — навык уходил дальше с $null,
 		# тогда как py-порт падал. Проверяем сами, чтобы порты вели себя одинаково.
 		if ([string]::IsNullOrWhiteSpace($text)) { throw 'input is empty' }
-		$parsed = $text | ConvertFrom-Json
+		# pwsh 7+ сам разворачивает массив верхнего уровня ([x] → x, [] → $null). Ключ -NoEnumerate
+		# появился там же: в 5.1 и pwsh 6 его нет, поэтому спрашиваем командлет, а не версию.
+		$cfj = @{}
+		$cfjKeys = (Get-Command ConvertFrom-Json).Parameters
+		if ($cfjKeys.ContainsKey('NoEnumerate')) { $cfj.NoEnumerate = $true }
+		# pwsh 7.5+ без -DateKind String превращает ISO-строки дат в DateTime, и в XML уходит формат
+		# локали; в 5.1 и pwsh до 7.5 ключа нет (5.1 даты и так не трогает).
+		if ($cfjKeys.ContainsKey('DateKind')) { $cfj.DateKind = 'String' }
+		$parsed = $text | ConvertFrom-Json @cfj
 	} catch {
 		$what = if ($expected) { "$source expects $expected" } else { "Invalid JSON in $source" }
 		if ($Inline) {
@@ -58,10 +83,7 @@ function ConvertFrom-JsonInput([string]$text, [string]$source, [string]$expected
 		[Console]::Error.WriteLine("[ERROR] ${what} ($($_.Exception.Message))")
 		exit 1
 	}
-	# PS 7 wraps a NON-array in a List<object> for -NoEnumerate, so the caller's
-	# $def.PSObject.Properties would list List members (Capacity, Count, …) instead of the
-	# JSON keys and every operation would be 'unknown'. Only arrays need the switch.
-	if ($parsed -is [System.Array]) { Write-Output -NoEnumerate $parsed } else { return $parsed }
+	return ,$parsed
 }
 
 # --- Чтение входного JSON-файла ---
@@ -112,6 +134,15 @@ if ($DefinitionFile -and $Operation) {
 }
 if (-not $DefinitionFile -and -not $Operation) {
 	Write-Error "Either -DefinitionFile or -Operation is required"
+	exit 1
+}
+# Local: -SourceFile belongs to import-attribute only — elsewhere it would be ignored silently.
+if ($SourceFile -and $Operation -ne 'import-attribute') {
+	[Console]::Error.WriteLine("[ERROR] -SourceFile is only valid with -Operation import-attribute. Nothing changed.")
+	exit 1
+}
+if ($Operation -eq 'import-attribute' -and -not $SourceFile) {
+	[Console]::Error.WriteLine("[ERROR] -Operation import-attribute requires -SourceFile <XML of the same object from the previous dump>. Nothing changed.")
 	exit 1
 }
 
@@ -376,6 +407,8 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		$G = 0; $K = 0; $text = $null; $parseOk = $false
 		try {
 			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
 			if ($bytes.Length -gt 32) {
 				$start = 0
 				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
@@ -940,18 +973,27 @@ function Build-FillValueXml {
 }
 
 function Build-MLTextXml {
-	param([string]$indent, [string]$tag, [string]$text)
-	if (-not $text) {
+	param([string]$indent, [string]$tag, $text)
+	# Строка → один язык (ru); объект/словарь { "ru": ..., "en": ... } → по элементу на язык.
+	$pairs = @()
+	if ($text -is [System.Collections.IDictionary]) {
+		foreach ($k in $text.Keys) { $pairs += ,@("$k", "$($text[$k])") }
+	} elseif ($text -is [System.Management.Automation.PSCustomObject]) {
+		foreach ($p in $text.PSObject.Properties) { $pairs += ,@("$($p.Name)", "$($p.Value)") }
+	} elseif ("$text") {
+		$pairs += ,@("ru", "$text")
+	}
+	if ($pairs.Count -eq 0) {
 		return "$indent<$tag/>"
 	}
-	$lines = @(
-		"$indent<$tag>"
-		"$indent`t<v8:item>"
-		"$indent`t`t<v8:lang>ru</v8:lang>"
-		"$indent`t`t<v8:content>$(Esc-XmlText $text)</v8:content>"
-		"$indent`t</v8:item>"
-		"$indent</$tag>"
-	)
+	$lines = @("$indent<$tag>")
+	foreach ($pr in $pairs) {
+		$lines += "$indent`t<v8:item>"
+		$lines += "$indent`t`t<v8:lang>$($pr[0])</v8:lang>"
+		$lines += "$indent`t`t<v8:content>$(Esc-XmlText $pr[1])</v8:content>"
+		$lines += "$indent`t</v8:item>"
+	}
+	$lines += "$indent</$tag>"
 	return $lines -join "`r`n"
 }
 
@@ -2715,9 +2757,9 @@ function Process-Add($addDef) {
 			}
 			{ $_ -in @("forms","templates") } {
 				# Форма и макет регистрируются голым текстом (<Form>Имя</Form>) и требуют ещё и
-				# собственных файлов. И то и другое делают form-add / template-add — дублировать
+				# собственных файлов. И то и другое делают form-add / add-template — дублировать
 				# эту ответственность здесь нельзя: получится висячая регистрация без файла.
-				$skillName = if ($childType -eq "forms") { "form-add" } else { "template-add" }
+				$skillName = if ($childType -eq "forms") { "form-add" } else { "add-template" }
 				$whatName  = if ($childType -eq "forms") { "Форму" } else { "Макет" }
 				Die "$whatName добавляет навык $skillName (он создаёт и файл, и запись в ChildObjects). meta-edit этого не делает."
 			}
@@ -2769,8 +2811,8 @@ function Process-Remove($removeDef) {
 			Die "Cannot remove properties — use modify instead"
 		}
 		if ($childType -in @("forms","templates")) {
-			# Снять регистрацию мало — надо удалить и файлы; это делают form-remove / template-remove.
-			$skillName = if ($childType -eq "forms") { "form-remove" } else { "template-remove" }
+			# Снять регистрацию мало — надо удалить и файлы; это делают remove-form / remove-template.
+			$skillName = if ($childType -eq "forms") { "remove-form" } else { "remove-template" }
 			$whatName  = if ($childType -eq "forms") { "Форму" } else { "Макет" }
 			Die "$whatName удаляет навык $skillName (он убирает и файлы, и запись в ChildObjects). meta-edit этого не делает."
 		}
@@ -2841,6 +2883,23 @@ function Modify-Properties($propsDef) {
 			} else {
 				Die "Property '$propName': could not create element"
 			}
+		}
+
+		# Многоязычная строка (синоним, представления, пояснение…): простой текст в таком теге платформа
+		# не загружает. Узел заменяется целиком — и пустой, и уже заполненный.
+		if ($script:localStringObjectProps -ccontains $propName) {
+			$mlNodes = Import-Fragment (Build-MLTextXml (Get-ChildIndent $script:propertiesEl) $propName $propValue)
+			if ($mlNodes.Count -gt 0) {
+				# InsertBefore+RemoveChild сохраняет whitespace позиции (как Set-AttrPropertyElement)
+				$script:propertiesEl.InsertBefore($mlNodes[0], $propEl) | Out-Null
+				$script:propertiesEl.RemoveChild($propEl) | Out-Null
+				$shown = if ($propValue -is [System.Management.Automation.PSCustomObject]) { ($propValue.PSObject.Properties | ForEach-Object { "$($_.Name): $($_.Value)" }) -join '; ' }
+					elseif ($propValue -is [System.Collections.IDictionary]) { ($propValue.Keys | ForEach-Object { "${_}: $($propValue[$_])" }) -join '; ' }
+					else { "$propValue" }
+				Info "Modified property: $propName = $shown"
+				$script:modifyCount++
+			}
+			return
 		}
 
 		# Handle boolean values
@@ -3359,6 +3418,13 @@ $script:knownObjectProps = @(
 	'StandardAttributes','StandardTabularSections','SubordinationUse','Synonym','Task','TaskNumberAutoPrefix',
 	'ToolTip','Type','UnpostInPrivilegedMode','UpdateDataHistoryImmediatelyAfterWrite','UseStandardCommands',
 	'VariantsStorage','WriteMode'
+)
+
+# Свойства объекта типа LocalStringType (XSD MDClasses) — modify-property пишет их многоязычной строкой.
+$script:localStringObjectProps = @(
+	'Synonym','ToolTip','Explanation','ObjectPresentation','ExtendedObjectPresentation','ListPresentation',
+	'ExtendedListPresentation','RecordPresentation','ExtendedRecordPresentation','ExtendedPresentation',
+	'Format','EditFormat'
 )
 
 # Известные свойства дочерних элементов (union Attribute/Dimension/Resource по корпусу) — allowlist default-ветки
@@ -4043,8 +4109,127 @@ function Add-PredefinedItems($items) {
 	$script:addCount += $n
 }
 
+# ============================================================
+# Section 9.6 (local): import-attribute — готовый реквизит из прошлой выгрузки
+# ============================================================
+#
+# Перенос доработок на новую выгрузку поставщика: реквизит уже есть в прошлой версии того же
+# объекта, и его uuid менять нельзя — по нему платформа сопоставляет реквизит с данными базы.
+# add-attribute выдал бы новый uuid, поэтому элемент <Attribute> копируется целиком, как есть.
+# Все проверки — до записи; реквизит, который в цели уже совпадает побайтно, не пишется вовсе.
+# Общей проверки uuid по всей конфигурации у meta-edit нет: коллизия ищется в файле цели,
+# по выгрузке целиком — uuid-check.
+
+$script:importOriginalBytes = $null
+
+function Get-DocumentUuids($doc) {
+	# Носители те же, что у uuid-check: атрибут uuid и xr:TypeId / xr:ValueId.
+	$set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+	foreach ($a in $doc.SelectNodes('//@uuid')) { [void]$set.Add($a.Value.Trim()) }
+	foreach ($e in $doc.SelectNodes("//*[local-name()='TypeId' or local-name()='ValueId']")) { [void]$set.Add($e.InnerText.Trim()) }
+	return ,$set
+}
+
+function Import-NativeAttributes([string]$sourcePath, [string]$valueList) {
+	$names = @(("$valueList" -split ';;') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+	if ($names.Count -eq 0) { Die "[ERROR] import-attribute: укажите имя реквизита в -Value (несколько — через ;;). Ничего не изменено." }
+	if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { Die "[ERROR] import-attribute: файл-источник не найден: $sourcePath. Ничего не изменено." }
+	$srcFull = (Resolve-Path -LiteralPath $sourcePath).ProviderPath
+	if ([string]::Equals([System.IO.Path]::GetFullPath($srcFull), [System.IO.Path]::GetFullPath($resolvedPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+		Die "[ERROR] import-attribute: источник и цель — один и тот же файл ($resolvedPath). В -SourceFile нужен XML объекта из прошлой выгрузки. Ничего не изменено."
+	}
+	$srcDoc = New-Object System.Xml.XmlDocument
+	$srcDoc.PreserveWhitespace = $true
+	try { $srcDoc.Load($srcFull) } catch { Die "[ERROR] import-attribute: источник не разбирается как XML ($srcFull): $($_.Exception.Message). Ничего не изменено." }
+	$srcObj = $null
+	if ($srcDoc.DocumentElement -and $srcDoc.DocumentElement.LocalName -eq 'MetaDataObject') {
+		foreach ($ch in $srcDoc.DocumentElement.ChildNodes) { if ($ch.NodeType -eq 'Element') { $srcObj = $ch; break } }
+	}
+	if (-not $srcObj) { Die "[ERROR] import-attribute: источник — не выгрузка объекта метаданных (нет MetaDataObject): $srcFull. Ничего не изменено." }
+	$srcProps = $null; $srcCo = $null; $srcName = ''
+	foreach ($ch in $srcObj.ChildNodes) {
+		if ($ch.NodeType -ne 'Element') { continue }
+		if ($ch.LocalName -eq 'Properties') { $srcProps = $ch }
+		if ($ch.LocalName -eq 'ChildObjects') { $srcCo = $ch }
+	}
+	if ($srcProps) {
+		foreach ($ch in $srcProps.ChildNodes) { if ($ch.NodeType -eq 'Element' -and $ch.LocalName -eq 'Name') { $srcName = $ch.InnerText.Trim(); break } }
+	}
+	# Владелец — тот же объект: тот же вид и то же имя (имена 1С регистронезависимы). uuid самого
+	# объекта не сравнивается: в новой выгрузке и после повторного заимствования он бывает другим.
+	if ($srcObj.LocalName -cne $script:objType -or $srcObj.NamespaceURI -ne $script:mdNs -or $srcName -ne $script:objName) {
+		Die "[ERROR] import-attribute: источник — $($srcObj.LocalName).$srcName, цель — $($script:objType).$($script:objName). Реквизит переносится только между версиями одного и того же объекта. Ничего не изменено."
+	}
+	if ($script:validChildTypes.ContainsKey($script:objType) -and ($script:validChildTypes[$script:objType] -notcontains 'attributes')) {
+		Die "[ERROR] import-attribute: у $($script:objType) нет реквизитов. Ничего не изменено."
+	}
+	$srcVersion = $srcDoc.DocumentElement.GetAttribute('version')
+	if ($srcVersion -and $srcVersion -ne $script:formatVersion) {
+		Warn "import-attribute: формат источника $srcVersion, цели $($script:formatVersion) — свойства реквизита копируются как есть, совместимость с форматом цели проверит meta-validate"
+	}
+	# Текстовые QName (xs:string, cfg:CatalogRef.X) импорт не переименовывает: каждый префикс, которым
+	# пользуется реквизит, цель должна объявлять с тем же пространством имён.
+	$srcNs = @{}; $tgtNs = @{}
+	foreach ($a in $srcDoc.DocumentElement.Attributes) { if ($a.Prefix -eq 'xmlns') { $srcNs[$a.LocalName] = $a.Value } }
+	foreach ($a in $script:xmlDoc.DocumentElement.Attributes) { if ($a.Prefix -eq 'xmlns') { $tgtNs[$a.LocalName] = $a.Value } }
+
+	$targetUuids = Get-DocumentUuids $script:xmlDoc
+	$existingNames = Get-AllChildNames
+	$script:importOriginalBytes = [System.IO.File]::ReadAllBytes($resolvedPath)
+	$identical = 0
+	foreach ($name in $names) {
+		$srcAttr = if ($srcCo) { Find-ElementByName $srcCo 'Attribute' $name } else { $null }
+		if (-not $srcAttr) { Die "[ERROR] import-attribute: в источнике нет реквизита '$name' ($srcFull). Ничего не изменено." }
+		$uuid = $srcAttr.GetAttribute('uuid')
+		if ($uuid -cnotmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\z' -or $uuid -eq '00000000-0000-0000-0000-000000000000') {
+			Die "[ERROR] import-attribute: у реквизита '$name' в источнике некорректный uuid '$uuid'. Ничего не изменено."
+		}
+		$existing = if ($script:childObjectsEl) { Find-ElementByName $script:childObjectsEl 'Attribute' $name } else { $null }
+		if ($existing) {
+			# Повторный импорт: совпадение побайтно (с точностью до перевода строки) — ничего не делать.
+			if (($existing.OuterXml -replace "`r`n", "`n") -ceq ($srcAttr.OuterXml -replace "`r`n", "`n")) {
+				Info "Attribute '$name' is already identical in the target — skipped"
+				$identical++
+				continue
+			}
+			Die "[ERROR] import-attribute: в цели уже есть реквизит '$name' (uuid $($existing.GetAttribute('uuid'))), и он отличается от реквизита источника (uuid $uuid). Существующий реквизит не перезаписывается — сравните их вручную. Ничего не изменено."
+		}
+		if ($existingNames.ContainsKey($name)) {
+			Die "[ERROR] import-attribute: имя '$name' в цели уже занято элементом <$($existingNames[$name])>. Ничего не изменено."
+		}
+		if ($targetUuids.Contains($uuid)) {
+			Die "[ERROR] import-attribute: uuid $uuid реквизита '$name' в цели уже занят другим элементом ($resolvedPath). Ничего не изменено."
+		}
+		$outer = $srcAttr.OuterXml
+		foreach ($p in @($srcNs.Keys)) {
+			if ($outer -cmatch ('(?<![\w.:-])' + [regex]::Escape($p) + ':\w') -and $tgtNs[$p] -cne $srcNs[$p]) {
+				Die "[ERROR] import-attribute: реквизит '$name' использует префикс '${p}:' ($($srcNs[$p])), а корень цели объявляет его $(if ($tgtNs[$p]) { "как $($tgtNs[$p])" } else { 'не объявляет' }). Ничего не изменено."
+			}
+		}
+		Ensure-ChildObjectsOpen
+		$indent = Get-ChildIndent $script:childObjectsEl
+		$node = $script:xmlDoc.ImportNode($srcAttr, $true)
+		$refNode = Find-InsertionPoint "Attribute" @{}
+		Insert-BeforeElement $script:childObjectsEl $node $refNode $indent
+		[void]$targetUuids.Add($uuid)
+		$existingNames[$name] = 'Attribute'
+		Info "Imported attribute: $name (uuid $uuid)"
+		$script:addCount++
+	}
+	if ($script:addCount -eq 0) {
+		Write-Host ""
+		Write-Host "=== meta-edit summary ===" -ForegroundColor Green
+		Write-Host "  Object:   $($script:objType).$($script:objName)"
+		Write-Host "  Imported: 0, already identical: $identical — the target file is not written" -ForegroundColor Yellow
+		exit 0
+	}
+}
+
 # --- Inline mode conversion ---
-if ($Operation) {
+if ($Operation -eq 'import-attribute') {
+	Import-NativeAttributes $SourceFile $Value
+	$def = [pscustomobject]@{}
+} elseif ($Operation) {
 	$def = Convert-InlineToDefinition $Operation $Value
 }
 if (-not $def) {
@@ -4067,7 +4252,8 @@ if (-not $def) {
 # and the Configurator does not recover from it — the result of the earlier
 # silent success. Fixing the builder means reimplementing the whole managed
 # scaffold that 1c-form-scaffold already owns, so the contract here is: refuse,
-# and name the working command. Removal (remove-form) is untouched.
+# and name the working command. Removal is refused further down (Process-Remove)
+# and points at remove-form / remove-template.
 function Test-DefinitionAddsForm($definition, [string]$childType = 'forms') {
 	# The gate has to see exactly what the dispatcher below will act on, so it walks
 	# every top-level operation through the same Resolve-OperationKey /
@@ -4113,13 +4299,22 @@ if (Test-DefinitionAddsForm $def 'templates') {
 
 # Gate 2 — the validator has to exist *before* the edit, not after it.
 #
-# The sibling directory is 1c-meta-validate downstream (upstream calls it
-# meta-validate), so the upstream-relative path resolved to nothing and the run
-# printed [SKIP] on an otherwise successful edit. A missing validator is now a
-# refusal raised before the mutation; -NoValidate stays the one explicit opt-out.
-$script:validateScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\1c-meta-validate\scripts\meta-validate.ps1'))
+# The sibling directories are 1c-meta-validate / 1c-epf-validate downstream
+# (upstream calls them meta-validate / epf-validate), so the upstream-relative
+# path resolved to nothing and the run printed [SKIP] on an otherwise successful
+# edit. A missing validator is now a refusal raised before the mutation;
+# -NoValidate stays the one explicit opt-out.
+# An external data processor / report is an autonomous object that meta-validate
+# does not know (upstream #108, 372510bb): it is checked by epf-validate.
+if (@('ExternalDataProcessor','ExternalReport') -contains $script:objType) {
+	$script:validateSkill = 'epf-validate'
+	$script:validateScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\1c-epf-validate\scripts\epf-validate.ps1'))
+} else {
+	$script:validateSkill = 'meta-validate'
+	$script:validateScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\1c-meta-validate\scripts\meta-validate.ps1'))
+}
 if (-not $NoValidate -and -not (Test-Path -LiteralPath $script:validateScript)) {
-	[Console]::Error.WriteLine("[ERROR] Обязательная автопроверка не может быть выполнена: meta-validate не найден по пути $($script:validateScript).")
+	[Console]::Error.WriteLine("[ERROR] Обязательная автопроверка не может быть выполнена: $($script:validateSkill) не найден по пути $($script:validateScript).")
 	[Console]::Error.WriteLine("        Правка не применена. Восстановите навык целиком либо запустите с -NoValidate, если проверка сознательно не нужна.")
 	exit 1
 }
@@ -4181,7 +4376,7 @@ $text = $text.Replace('encoding="utf-8"', 'encoding="UTF-8"')
 # Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 # CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 # поэтому они идут первыми ветками альтернации и возвращаются как есть.
-$text = [regex]::Replace($text, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+$text = [regex]::Replace($text, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 
 # Write with BOM
 $utf8Bom = New-Object System.Text.UTF8Encoding($true)
@@ -4208,24 +4403,16 @@ foreach ($pw in $script:pendingWrites.GetEnumerator()) {
 # that reported errors must not be summarized as a successful edit.
 $script:validateExitCode = 0
 if (-not $NoValidate) {
-	# Внешняя обработка/отчёт — автономный объект, meta-validate его не знает (#108).
-	$validateSkill = if (@('ExternalDataProcessor','ExternalReport') -contains $script:objType) { "epf-validate" } else { "meta-validate" }
-	# 1c-rules: the sibling tools live under the fork's own directory names.
-	$validateDir = "1c-$validateSkill"
-	$validateScript = Join-Path (Join-Path $PSScriptRoot "..\..\$validateDir") "scripts\$validateSkill.ps1"
-	$validateScript = [System.IO.Path]::GetFullPath($validateScript)
-	if (Test-Path $validateScript) {
-		Write-Host ""
-		Write-Host "--- Running $validateSkill ---" -ForegroundColor DarkGray
-		& powershell.exe -NoProfile -File $validateScript -ObjectPath $resolvedPath
-		# 1c-rules: the validator's verdict is the run's result, not a log note.
-		$script:validateExitCode = $LASTEXITCODE
-		if ($script:validateExitCode -ne 0) {
-			[Console]::Error.WriteLine("[ERROR] $validateSkill завершился с кодом $($script:validateExitCode): изменение записано, но объект не проходит проверку. Разберите вывод выше перед загрузкой в базу.")
-		}
-	} else {
-		Write-Host ""
-		Write-Host "[SKIP] $validateSkill not found at: $validateScript" -ForegroundColor DarkGray
+	Write-Host ""
+	Write-Host "--- Running $($script:validateSkill) ---" -ForegroundColor DarkGray
+	& powershell.exe -NoProfile -File $script:validateScript -ObjectPath $resolvedPath
+	$script:validateExitCode = $LASTEXITCODE
+	if ($script:validateExitCode -ne 0 -and $null -ne $script:importOriginalBytes) {
+		# Local: import-attribute не оставляет непроходящий проверку объект — исходные байты возвращаются.
+		[System.IO.File]::WriteAllBytes($resolvedPath, $script:importOriginalBytes)
+		[Console]::Error.WriteLine("[ERROR] $($script:validateSkill) завершился с кодом $($script:validateExitCode): import-attribute отменён, файл цели восстановлен побайтно. Разберите вывод выше.")
+	} elseif ($script:validateExitCode -ne 0) {
+		[Console]::Error.WriteLine("[ERROR] $($script:validateSkill) завершился с кодом $($script:validateExitCode): изменение записано, но объект не проходит проверку. Разберите вывод выше перед загрузкой в базу.")
 	}
 }
 

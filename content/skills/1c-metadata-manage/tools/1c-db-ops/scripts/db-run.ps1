@@ -1,5 +1,9 @@
 ﻿# db-run v1.16 — Launch 1C:Enterprise
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local (1c-rules): .dev.env first — PLATFORM_PATH (an install dir resolves to bin\1cv8.exe) before
+#   the v8path of the .v8-project.json record / root, PLATFORM_ARGS / IBCMD_ARGS before v8args /
+#   ibcmdargs, the .dev.env directory is a project root for relative infobase paths;
+#   /ConfigurationRepositoryP is masked like /P.
 # NB: *nix-раскладку платформы (/opt/1cv8/<ver>/1cv8, без .exe) знает только .py-порт — PS на *nix не исполняется.
 <#
 .SYNOPSIS
@@ -128,7 +132,7 @@ $script:IbcmdOwnedKeys = @(
     '--import', '--export', '--apply', '--force', '--create-database',
     '--user', '--password'
 )
-$script:V8SecretKeys = @('/P', '/UC', '/WSP', '/AWSP')
+$script:V8SecretKeys = @('/P', '/UC', '/WSP', '/AWSP', '/ConfigurationRepositoryP')
 $script:IbcmdSecretKeys = @('--password', '--token', '--db-pwd')
 
 function Test-ArgKeyMatch {
@@ -294,7 +298,8 @@ function Resolve-InfoBasePath {
         $base = $cwd
         $d = $cwd
         for ($i = 0; $i -lt 20 -and $d; $i++) {
-            if (Test-Path -LiteralPath (Join-Path $d ".v8-project.json")) { $base = $d; break }
+            # 1c-rules: the project root is the nearest directory with .dev.env or .v8-project.json.
+            if ((Test-Path -LiteralPath (Join-Path $d ".dev.env")) -or (Test-Path -LiteralPath (Join-Path $d ".v8-project.json"))) { $base = $d; break }
             $parent = [System.IO.Path]::GetDirectoryName($d)
             if ($parent -eq $d) { break }
             $d = $parent
@@ -354,8 +359,9 @@ function Find-ProjectDatabase {
 
 # --- Resolve V8Path ---
 function Find-ProjectV8Path {
-    # 1c-rules: .dev.env is this project's single source of truth — it wins over
-    # .v8-project.json, which stays supported as the upstream fallback below.
+    # 1c-rules: -V8Path (caller) -> .dev.env PLATFORM_PATH -> v8path of the matching .v8-project.json
+    # database record -> root v8path -> auto-detect. .dev.env is this project's single source of
+    # truth; .v8-project.json stays supported as the upstream fallback below.
     $__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
     if (Test-Path $__devEnvHelper) {
         . $__devEnvHelper

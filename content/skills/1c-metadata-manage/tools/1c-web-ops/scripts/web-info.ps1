@@ -1,5 +1,8 @@
 ﻿# web-info v1.7 — Apache & 1C publication status
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: consolidated-layout default -ApachePath (working directory); the error log is the
+#        effective ErrorLog (global block first, then the last directive); Pwd is masked in
+#        the printed connection string.
 <#
 .SYNOPSIS
     Статус Apache и публикаций 1С
@@ -29,8 +32,11 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # --- Resolve ApachePath ---
 if (-not $ApachePath) {
-    $projectRoot = (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName
+    $projectRoot = (Get-Location).ProviderPath  # consolidated skill layout: project root = current working directory
     $ApachePath = Join-Path $projectRoot "tools\apache24"
+}
+if (-not [System.IO.Path]::IsPathRooted($ApachePath)) {
+    $ApachePath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $ApachePath))
 }
 
 # --- Check Apache installation ---
@@ -143,7 +149,9 @@ if ($pubMatches.Count -eq 0) {
         if (Test-Path $vrdPath) {
             $vrdContent = [System.IO.File]::ReadAllText($vrdPath)
             if ($vrdContent -match 'ib="([^"]*)"') {
-                $ibInfo = $Matches[1] -replace '&quot;','"'
+                $ibInfo = $Matches[1] -replace '&quot;','"' -replace '&lt;','<' -replace '&gt;','>' -replace '&#9;',"`t" -replace '&amp;','&'
+                # 1c-rules: the connection string can carry the embedded password — never print it
+                $ibInfo = $ibInfo -replace '(?i)(Pwd=)("[^"]*"|[^;]*)', '$1***'
             }
         }
 
@@ -180,9 +188,19 @@ Write-Host ""
 Write-Host "=== Последние ошибки ===" -ForegroundColor Cyan
 
 # Имя файла берём из httpd.conf: сборки Apache расходятся (error.log / error_log)
+# 1c-rules: действует последняя директива ErrorLog основного сервера; наш глобальный блок
+# (его пишет и Python-порт) стоит в конце файла, поэтому смотрим сначала в него.
 $errorLog = $null
-if ($confContent -match '(?m)^\s*ErrorLog\s+"?([^"\r\n]+)"?') {
-    $logPath = $Matches[1].Trim()
+$errorLogPattern = '(?m)^[ \t]*ErrorLog[ \t]+"?([^"\r\n]+)"?'
+$errorLogMatch = $null
+if ($confContent -match '(?s)# --- 1C: global ---(.*?)# --- End: global ---') {
+    $errorLogMatch = [regex]::Matches($Matches[1], $errorLogPattern) | Select-Object -Last 1
+}
+if (-not $errorLogMatch) {
+    $errorLogMatch = [regex]::Matches($confContent, $errorLogPattern) | Select-Object -Last 1
+}
+if ($errorLogMatch) {
+    $logPath = $errorLogMatch.Groups[1].Value.Trim()
     if ([System.IO.Path]::IsPathRooted($logPath)) {
         $errorLog = $logPath
     } else {

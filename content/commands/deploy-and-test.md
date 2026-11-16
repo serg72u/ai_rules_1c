@@ -10,7 +10,7 @@ Resolve project, main/named-extension target and source root through `content/ru
 
 When the user asks to deploy the full snapshot ("all" / "with extensions"), resolve inventory even if `EXTENSION_NAMES` is empty, then run Steps 2–3 as main followed by each selected extension per `/update1cbase → Full-snapshot mode` (`content/commands/update1cbase.md`). Confirmed no extensions means main only; a stored single-extension default cannot narrow `all`.
 
-**Load scope is owned by `/update1cbase → Select load scope`.** For partial / Git deployment, follow that command's complete load → checks → apply sequence, including file-list validation and baseline handling, then continue here at Step 4. Do not execute the full-load examples below as well. A failed load or apply blocks UI tests. A requested return export follows `/loadfrom1cbase` after apply with the same target and scope guards (`content/rules/getconfigfiles.md → Configuration file synchronization contract`).
+**Load scope is owned by `/update1cbase → Select load scope`.** For partial / Git deployment, follow that command's complete load → checks → apply sequence, including file-list validation and baseline handling, then continue here at Step 4. Do not execute the full-load examples below as well. A failed load or apply blocks UI tests. A requested return export follows `/loadfrom1cbase` after apply with the same target and scope guards (`content/rules/config-sync-contract.md`).
 
 ## Step 0. Check `.dev.env` parameters
 
@@ -26,7 +26,7 @@ Before running, inherit `/update1cbase`'s source-identity, completeness and sele
 
 **EDT gate:** when `.dev.env` `USE_EDT=true`, the same source-format check as `/update1cbase` applies — Steps 2–3 load a Designer XML dump, not an EDT `src/**/*.mdo` tree, and only one deployment owner (this command **or** EDT's `update_database`) may act on the infobase in a run. Canon — `content/rules/edt-workflow.md`.
 
-This command uses forced session termination while applying the DB configuration. The target must be an explicitly identified dev/test infobase: `.dev.env` `INFOBASE_ROLE=dev|test` identifies it, `prod` refuses the deploy steps (canon `content/rules/dev-standards-env.md → INFOBASE_ROLE`). If the role is empty and the current context does not establish it, stop before Step 3 and ask the user to confirm the target; never infer that an arbitrary `.dev.env` points to a test base.
+This command uses forced session termination while applying the DB configuration. The target must be an explicitly identified dev/test infobase: `.dev.env` `INFOBASE_ROLE=dev|test` identifies it, `prod` refuses the deploy steps (canon `content/rules/dev-standards-env.md → INFOBASE_ROLE`). If the role is empty and the current context does not establish it, stop before Step 2 and ask the user to confirm the target — the load already changes the infobase configuration; never infer that an arbitrary `.dev.env` points to a test base.
 
 ## Step 1. Choose tool: `ibcmd` or Designer
 
@@ -74,7 +74,7 @@ Read `{LOG_PATH}`. On errors, show the relevant log fragment and **do not run** 
     {INFOBASE_FLAG} '{INFOBASE_PATH}' `
     /N '{IB_USER}' `
     /P '{IB_PASSWORD}' `
-    /DisableStartupMessages `
+    /DisableStartupMessages /DisableStartupDialogs `
     /LoadConfigFromFiles '{EXPORT_PATH}' `
     -updateConfigDumpInfo `
     -Extension {EXTENSION_NAME} `
@@ -93,7 +93,7 @@ Read the verdict from all three signals (`{RESULT_PATH}` = `0`, exit code, `{LOG
     {INFOBASE_FLAG} '{INFOBASE_PATH}' `
     /N '{IB_USER}' `
     /P '{IB_PASSWORD}' `
-    /DisableStartupMessages `
+    /DisableStartupMessages /DisableStartupDialogs `
     /UpdateDBCfg -Dynamic+ -SessionTerminate force `
     -Extension {EXTENSION_NAME} `
     /Out '{LOG_PATH}' `
@@ -106,7 +106,7 @@ Read the verdict from all three signals (`{RESULT_PATH}`, exit code, `{LOG_PATH}
 
 ## Step 3c. Applicability check — mandatory when an extension is deployed
 
-Whenever this run loads an extension (`EXTENSION_NAME` filled, or a full-snapshot pass over `EXTENSION_NAMES`), run `/update1cbase → Step 2c` (`content/commands/update1cbase.md` — the `/CheckModules` → `/CheckCanApplyConfigurationExtensions` ladder with the three-signal verdict) **between the load (Step 2) and the DB update (Step 3)**, in the `ibcmd` path as well. Stop at the first failure and do not run Step 3. For the main configuration alone the ladder is optional — run `/CheckConfig` when the change is large (whole-snapshot deploy, release build) or when the Gate 1–3 MCP validators were not exposed in this session.
+Whenever this run loads an extension (`EXTENSION_NAME` filled, or a full-snapshot pass over `EXTENSION_NAMES`), run `/update1cbase → Step 2c` (`content/commands/update1cbase.md` — the `/CheckModules` → `/CheckCanApplyConfigurationExtensions` → `/CheckConfig` ladder with the three-signal verdict) **between the load (Step 2) and the DB update (Step 3)**, in the `ibcmd` path as well. Stop at the first failure and do not run Step 3. For the main configuration alone the ladder is optional — run `/CheckModules` and `/CheckConfig` (without `-Extension`) when the change is large (whole-snapshot deploy, release build) or when the Gate 1–3 MCP validators were not exposed in this session.
 
 ## Failure handling for Steps 2–3 — retry loop
 
@@ -139,13 +139,9 @@ Load `content/rules/ui-testing-tools.md` and run its **Preflight before web UI t
 
 ### Step 4c. Run web scenarios
 
-Open `{INFOBASE_PUBLISH_URL}` with the tool chosen in 4b. Prefer **`agent-browser`** (a11y snapshots); built-in browser MCP only after decline / no-operator fallback; **`Windows-MCP`** (`/install-windows-mcp`) only for unavoidable desktop / thick-client automation — never as the default for the web client, never a home-grown screenshotter/OCR. Rules:
+Open `{INFOBASE_PUBLISH_URL}` with the tool chosen in 4b. Prefer **`agent-browser`** (a11y snapshots); built-in browser MCP only after decline / no-operator fallback; **`agent-desktop`** (`/install-agent-desktop`) only for native windows outside the 1C testing model — never for a web page, never a home-grown screenshotter/OCR. Rules:
 
-- Prefer snapshot/refs observe loops over screenshot/vision.
-- **MUST** use delayed human-like typing when filling fields.
-- Use TAB to move between form fields.
-- Wait for elements to load before interacting.
-- Take screenshots at key steps for documentation (evidence, not the observe loop).
+Driving rules — `content/rules/web-client-driving.md`: headed run, snapshot / refs observe loop, human-like typing with its paste fallback, TAB between fields, waits, screenshots of key steps as evidence.
 
 ## Step 5. Final report
 

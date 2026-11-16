@@ -1,5 +1,6 @@
 ﻿# web-stop v1.4 — Stop Apache HTTP Server
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: consolidated-layout default -ApachePath (working directory); hints name our scripts.
 <#
 .SYNOPSIS
     Остановка Apache HTTP Server
@@ -29,8 +30,11 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # --- Resolve ApachePath ---
 if (-not $ApachePath) {
-    $projectRoot = (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName
+    $projectRoot = (Get-Location).ProviderPath  # consolidated skill layout: project root = current working directory
     $ApachePath = Join-Path $projectRoot "tools\apache24"
+}
+if (-not [System.IO.Path]::IsPathRooted($ApachePath)) {
+    $ApachePath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).ProviderPath $ApachePath))
 }
 
 # --- Helper: filter httpd processes by our ApachePath ---
@@ -70,7 +74,7 @@ while ($elapsed -lt $maxWait) {
     $check = Get-OurHttpd
     if (-not $check) {
         Write-Host "Apache остановлен" -ForegroundColor Green
-        Write-Host "Публикации сохранены. Перезапуск: /web-publish <база>  Удаление: /web-unpublish --all" -ForegroundColor Gray
+        Write-Host "Публикации сохранены. Перезапуск: web-publish.ps1 с теми же параметрами. Удаление: web-unpublish.ps1 -All -DryRun, затем -Force" -ForegroundColor Gray
         exit 0
     }
 }
@@ -89,4 +93,4 @@ if ($remaining) {
 }
 
 Write-Host "Apache остановлен" -ForegroundColor Green
-Write-Host "Публикации сохранены. Перезапуск: /web-publish <база>  Удаление: /web-unpublish --all" -ForegroundColor Gray
+Write-Host "Публикации сохранены. Перезапуск: web-publish.ps1 с теми же параметрами. Удаление: web-unpublish.ps1 -All -DryRun, затем -Force" -ForegroundColor Gray

@@ -1,5 +1,8 @@
 ﻿# xdto-edit v1.9 — Point edits of a 1C XDTO package (+support-guard: общая реализация вместо урезанной)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
+# Local: .dev.env SUPPORT_GUARD first (shared support guard, fail-closed on an unreadable bin);
+#   xdto-decompile / xdto-compile / xdto-validate are siblings in this scripts dir; a missing
+#   validator or its non-zero exit is the exit code (upstream skips it with exit 0).
 [CmdletBinding(PositionalBinding=$false)]
 param(
 	[Parameter(Mandatory=$true)]
@@ -24,10 +27,12 @@ $MD_NS   = "http://v8.1c.ru/8.3/MDClasses"
 $V8_NS   = "http://v8.1c.ru/8.1/data/core"
 
 # --- Support guard (Ext/ParentConfigurations.bin) ---
-# See docs/1c-support-state-spec.md. Blocks edits of vendor objects "на замке" /
+# Canon: docs/support-manage.md. Blocks edits of vendor objects "на замке" /
 # read-only configs unless allowed. Trigger = bin present; reaction from
-# .v8-project.json editingAllowedCheck (deny|warn|off, default deny). Never
-# throws — guard errors degrade to allow.
+# .dev.env SUPPORT_GUARD (deny|warn|off, default deny; .v8-project.json
+# editingAllowedCheck stays as the upstream fallback). Fail-closed on an
+# unreadable support state (bin exists but cannot be parsed — same reaction);
+# other guard errors degrade to allow with a stderr notice.
 function Get-RootUuid([string]$xmlPath) {
 	if (-not (Test-Path $xmlPath)) { return $null }
 	try {
@@ -60,15 +65,14 @@ function Find-V8Project([string]$startDir) {
 	return $null
 }
 function Get-EditMode([string]$cfgDir) {
-	# 1c-rules: .dev.env SUPPORT_GUARD wins over .v8-project.json editingAllowedCheck.
-	$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
-	if (Test-Path $__devEnvHelper) {
-	    . $__devEnvHelper
-	    $__devEnvMode = (Get-1CDevEnvValue 'SUPPORT_GUARD').ToLower()
-	    if (@('deny', 'warn', 'off') -contains $__devEnvMode) { return $__devEnvMode }
-	}
-	$mode = "deny"
 	try {
+		# 1c-rules: .dev.env SUPPORT_GUARD wins over .v8-project.json editingAllowedCheck.
+		$__devEnvHelper = Join-Path $PSScriptRoot '../../_common/DevEnv.ps1'
+		if (Test-Path $__devEnvHelper) {
+		    . $__devEnvHelper
+		    $__devEnvMode = (Get-1CDevEnvValue 'SUPPORT_GUARD').ToLower()
+		    if (@('deny', 'warn', 'off') -contains $__devEnvMode) { return $__devEnvMode }
+		}
 		$pj = Find-V8Project (Get-Location).ProviderPath
 		if (-not $pj) { $pj = Find-V8Project ([System.IO.Path]::GetFullPath($cfgDir)) }
 		if (-not $pj) { return 'deny' }
@@ -116,15 +120,33 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		# New object (no element file): fall back to config root uuid.
 		if (-not $elemUuid -and $cfgDir) { $elemUuid = Get-RootUuid (Join-Path $cfgDir "Configuration.xml") }
 		if (-not $binPath -or -not (Test-Path $binPath)) { return }
-		$bytes = [System.IO.File]::ReadAllBytes($binPath)
-		if ($bytes.Length -le 32) { return }
-		$start = 0
-		if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
-		$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
-		$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
-		if (-not $hm.Success) { return }
-		$G = [int]$hm.Groups[1].Value
-		$K = [int]$hm.Groups[2].Value
+		# Bin present: an unreadable / unparseable support state must not silently
+		# degrade to allow — fail closed via the SUPPORT_GUARD reaction instead.
+		$G = 0; $K = 0; $text = $null; $parseOk = $false
+		try {
+			$bytes = [System.IO.File]::ReadAllBytes($binPath)
+			# A state of 32 bytes or less is the empty container a configuration keeps when vendor support was removed completely (docs/1c-support-state-spec.md upstream: ~16 bytes) - nothing is on support, so it is not 'unreadable'.
+			if ($bytes.Length -le 32) { $parseOk = $true }
+			if ($bytes.Length -gt 32) {
+				$start = 0
+				if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { $start = 3 }
+				$text = [System.Text.Encoding]::UTF8.GetString($bytes, $start, $bytes.Length - $start)
+				$hm = [regex]::Match($text, '^\{6,(\d+),(\d+),')
+				if ($hm.Success) {
+					$G = [int]$hm.Groups[1].Value
+					$K = [int]$hm.Groups[2].Value
+					$parseOk = $true
+				}
+			}
+		} catch {}
+		if (-not $parseOk) {
+			$mode = Get-EditMode $cfgDir
+			if ($mode -eq 'off') { return }
+			$msg = "[support-guard] Файл состояния поддержки «$binPath» существует, но не читается или не разбирается — состояние объекта неизвестно, он может быть на замке."
+			if ($mode -eq 'warn') { [Console]::Error.WriteLine("$msg Продолжаю по SUPPORT_GUARD=warn."); return }
+			[Console]::Error.WriteLine("$msg`nРедактирование остановлено (fail-closed). Проверьте целостность выгрузки, либо задайте SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md).")
+			exit 1
+		}
 		if ($K -eq 0) { return }
 		$best = $null
 		if ($elemUuid) {
@@ -150,7 +172,7 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		if ($mode -eq 'warn') { [Console]::Error.WriteLine("[support-guard] ПРЕДУПРЕЖДЕНИЕ: $reason. Цель: $rp"); return }
 		$head = "[support-guard] Редактирование отклонено: это объект типовой конфигурации на поддержке поставщика, прямое редактирование молча сломает будущие обновления."
 		$cfe = "Рекомендуемый путь: внести доработку в расширение (навыки cfe-borrow / cfe-patch-method) — состояние поддержки менять не нужно, обновления вендора сохраняются."
-		$offNote = "Снять проверку для этой базы: editingAllowedCheck = warn|off в .v8-project.json."
+		$offNote = "Снять проверку: SUPPORT_GUARD = warn|off в .dev.env (канон — docs/support-manage.md)."
 		if ($code -eq "capability-off") {
 			$state = "Состояние: у всей конфигурации выключена возможность изменения (режим read-only «из коробки») — поэтому объект «$rp» редактировать нельзя."
 			$fix = "Либо снять защиту явно (навык support-edit, два шага):`n  1. support-edit -Path ""$cfgDir"" -Capability on — включить возможность изменения (объекты пока остаются на замке);`n  2. support-edit -Path ""$rp"" -Set editable — открыть этот объект для редактирования.`n  Изменение применяется в базу полной загрузкой выгрузки и обходит механизм обновлений вендора."
@@ -163,7 +185,10 @@ function Assert-EditAllowed([string]$targetPath, [string]$require) {
 		}
 		[Console]::Error.WriteLine("$head`n$state`n$cfe`n$fix`n$offNote")
 		exit 1
-	} catch { return }
+	} catch {
+		[Console]::Error.WriteLine("[support-guard] Проверка состояния поддержки не выполнена ($($_.Exception.Message)) — продолжаю без блокировки.")
+		return
+	}
 }
 
 # --- Resolve package ------------------------------------------------------------
@@ -314,7 +339,7 @@ function Edit-Metadata([string]$field, [string]$newValue) {
 	# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 	# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 	# поэтому они идут первыми ветками альтернации и возвращаются как есть.
-	$mdText = [regex]::Replace($mdText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+	$mdText = [regex]::Replace($mdText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 	# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 	# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
 	$targetEol = if ((Test-Path -LiteralPath $mdFile) -and ([System.IO.File]::ReadAllText($mdFile) -notmatch "`r`n")) { "`n" } else { "`r`n" }
@@ -359,7 +384,7 @@ function Rename-Package([string]$newName) {
 			# Пустой элемент: XmlWriter отдаёт `<a />`, Конфигуратор пишет `<a/>`. Внутри
 			# CDATA/комментария ` />` может быть содержимым (там `>` не экранируется),
 			# поэтому они идут первыми ветками альтернации и возвращаются как есть.
-			$cfgText = [regex]::Replace($cfgText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|<\?.*?\?>|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
+			$cfgText = [regex]::Replace($cfgText, '(?s)<!\[CDATA\[.*?\]\]>|<!--.*?-->|(?<=\S) />', { param($m) if ($m.Value -eq ' />') { '/>' } else { $m.Value } })
 			# Целевой перевод строки: стиль файла-назначения — правка наследует его (#44/#46/#47),
 			# новый файл получает канон выгрузки CRLF. Зеркало _detect_xml_style в py-порту.
 			$targetEol = if ((Test-Path -LiteralPath $configXml) -and ([System.IO.File]::ReadAllText($configXml) -notmatch "`r`n")) { "`n" } else { "`r`n" }
@@ -660,13 +685,22 @@ if ($Operation -eq "rename") {
 
 # --- Validate -------------------------------------------------------------------
 
+# Local: a missing sibling validator or its non-zero exit is the run's result —
+# the edit is already written, and exit 0 would hide that it was not checked.
+$script:validateExitCode = 0
 if (-not $NoValidate) {
-	if (Test-Path $validateScript) {
+	if (Test-Path -LiteralPath $validateScript) {
 		Write-Host ""
 		Write-Host "--- xdto-validate ---"
 		& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $validateScript -PackagePath (Join-Path $xdtoRoot $pkgName)
+		$script:validateExitCode = $LASTEXITCODE
+		if ($script:validateExitCode -ne 0) {
+			[Console]::Error.WriteLine("[ERROR] xdto-validate завершился с кодом $($script:validateExitCode): изменение записано, но проверка не пройдена. Разберите вывод выше перед загрузкой в базу.")
+		}
 	} else {
-		Write-Host "[SKIP] xdto-validate не найден: $validateScript"
+		[Console]::Error.WriteLine("[ERROR] xdto-validate не найден по пути ${validateScript}. Изменение записано, но НЕ проверено.")
+		$script:validateExitCode = 1
 	}
 }
+if ($script:validateExitCode -ne 0) { exit $script:validateExitCode }
 exit 0
